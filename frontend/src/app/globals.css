@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* If you have Roobert font files, add them here:
+@font-face {
+  font-family: 'Roobert';
+  src: url('/fonts/Roobert-Light.woff2') format('woff2');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+*/
+
+:root {
+  --background: #000;
+  --foreground: rgba(255, 255, 255, 0.87);
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-feature-settings: 'rlig' 1, 'calt' 1;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Code styling - consistent monospace font */
+code {
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+}
+
