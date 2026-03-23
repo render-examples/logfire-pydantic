@@ -759,15 +759,23 @@ Render complies with:
 
 
 async def generate_embedding(text: str) -> List[float]:
-    """Generate embedding for text."""
-    
-    response = await openai_client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text,
-        dimensions=1536
-    )
-    
-    return response.data[0].embedding
+    """Generate embedding for text with exponential backoff retry on rate limits."""
+    import openai
+
+    for attempt in range(5):
+        try:
+            response = await openai_client.embeddings.create(
+                model="text-embedding-3-small",
+                input=text,
+                dimensions=1536
+            )
+            return response.data[0].embedding
+        except openai.RateLimitError as e:
+            if attempt == 4:
+                raise
+            wait = 2 ** attempt  # 1s, 2s, 4s, 8s
+            print(f"\n  ⏳ Rate limited, retrying in {wait}s...")
+            await asyncio.sleep(wait)
 
 
 def validate_api_keys():
@@ -874,8 +882,8 @@ async def main():
         
         embedded_docs.append(embedded_doc)
         
-        # Small delay to avoid rate limits
-        await asyncio.sleep(0.2)
+        # Delay to stay under 100 RPM limit (need >0.6s per request)
+        await asyncio.sleep(0.65)
         
         # Show progress every 50 chunks
         if i % 50 == 0:

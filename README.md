@@ -95,14 +95,14 @@ The app answers questions about deployment, databases, pricing, configuration, n
                           ↓ HTTPS
 ┌─────────────────────────────────────────────────────────────┐
 │  Backend API (FastAPI + LangChain + Logfire)                │
-│  Deployed as: Render Web Service (Python 3.11+)             │
+│  Deployed as: Render Web Service (Python 3.13)              │
 │                                                             │
 │  8-Stage Pipeline:                                          │
 │  ┌────────────────────────────────────────────────────────┐ │
 │  │ [1] Question Embedding      (OpenAI)                   │ │
 │  │ [2] RAG Document Retrieval  (pgvector + BM25)          │ │
 │  │ [3] Answer Generation       (Claude Sonnet 4.5)        │ │
-│  │ [4] Claims Extraction       (GPT-4o-mini)              │ │
+│  │ [4] Claims Extraction       (GPT-5.4-mini)             │ │
 │  │ [5] Claims Verification     (RAG again)                │ │
 │  │ [6] Technical Accuracy      (Claude Sonnet 4)          │ │
 │  │ [7] Quality Rating          (OpenAI + Anthropic)       │ │
@@ -126,7 +126,7 @@ The app answers questions about deployment, databases, pricing, configuration, n
 render-qa-assistant/
 ├── backend/
 │   ├── main.py                    # FastAPI application entry
-│   ├── requirements.txt           # Python dependencies
+│   ├── requirements.txt           # Legacy pip dependencies (reference only)
 │   ├── api/
 │   │   └── logs.py                # Logfire logs API endpoint
 │   ├── pipeline/                  # 8-stage pipeline implementation
@@ -146,6 +146,9 @@ render-qa-assistant/
 │   ├── OBSERVABILITY.md           # Logfire instrumentation guide
 │   ├── CONFIGURATION.md           # Configuration reference
 │   └── HYBRID_SEARCH.md           # Hybrid search deep-dive
+├── pyproject.toml                 # Python dependencies (uv)
+├── uv.lock                        # Locked dependency versions
+├── .python-version                # Pins Python to 3.13
 ├── render.yaml                    # Infrastructure as code
 ├── .env.example                   # Environment variables template
 └── README.md                      # This file
@@ -157,17 +160,17 @@ render-qa-assistant/
 
 ### Prerequisites
 
-- Python 3.11+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (manages Python 3.13 automatically)
 - Node.js 18+
 - PostgreSQL 16+ (with pgvector extension)
 - OpenAI API key
 - Anthropic API key
-- Logfire account (free tier available)
+- Logfire account (free tier available) — you'll need a **write token** from Settings > Write Tokens
 
 ### Local Development (with Make)
 
 ```bash
-# 1. Install everything
+# 1. Install everything (uv installs Python 3.13 automatically)
 make install
 
 # 2. Set up .env file
@@ -177,7 +180,7 @@ make dev-setup
 # 3. Start database
 make db-start
 
-# 4. Load documentation
+# 4. Load documentation (this step might take a while!)
 make ingest
 
 # 5. Run backend (in one terminal)
@@ -190,24 +193,22 @@ make run-frontend
 ### Manual Setup
 
 ```bash
-# 1. Install Python dependencies
-python3 -m venv venv
-source venv/bin/activate
-pip install -r backend/requirements.txt
+# 1. Install Python dependencies (uv reads .python-version → 3.13)
+uv sync --group dev
 
 # 2. Configure environment
-cp .env.local .env
+cp .env.example .env
 # Edit .env with your API keys
 
 # 3. Start PostgreSQL with Docker
 docker-compose up -d
 
 # 4. Generate and load documentation
-python data/scripts/generate_embeddings.py
-python data/scripts/ingest_docs.py
+uv run python data/scripts/generate_embeddings.py
+uv run python data/scripts/ingest_docs.py
 
 # 5. Run backend (from project root)
-uvicorn backend.main:app --reload --port 8000
+uv run uvicorn backend.main:app --reload --port 8000
 
 # 6. Run frontend (separate terminal)
 cd frontend && npm install && npm run dev
@@ -240,7 +241,7 @@ cd frontend && npm install && npm run dev
 
    - `OPENAI_API_KEY` (required)
    - `ANTHROPIC_API_KEY` (required)
-   - `LOGFIRE_TOKEN` (required)
+   - `LOGFIRE_TOKEN` (required) — write token from [logfire.pydantic.dev](https://logfire.pydantic.dev) under Settings > Write Tokens
 
 5. **Deploy completes in ~5 minutes**
 

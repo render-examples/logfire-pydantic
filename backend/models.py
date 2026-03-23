@@ -5,6 +5,41 @@ from typing import Optional
 from datetime import datetime
 
 
+# ---------------------------------------------------------------------------
+# Intermediate structured output models for pydantic-ai agents
+# ---------------------------------------------------------------------------
+
+class QueryExpansionOutput(BaseModel):
+    """Structured output for query expansion agent."""
+    queries: list[str] = Field(..., description="Alternative query phrasings")
+
+
+class ClaimsOutput(BaseModel):
+    """Structured output for claims extraction agent."""
+    claims: list[str] = Field(..., description="Extracted factual claims")
+
+
+class AccuracyOutput(BaseModel):
+    """Structured output for technical accuracy agent."""
+    accuracy_score: int = Field(..., ge=0, le=100, description="Accuracy score (0-100)")
+    errors: list[str] = Field(default_factory=list, description="Technical errors found")
+    corrections: list[str] = Field(default_factory=list, description="Suggested corrections")
+
+
+class EvaluationOutput(BaseModel):
+    """Structured output for quality evaluation agents."""
+    technical_accuracy: int = Field(..., ge=0, le=100)
+    clarity: int = Field(..., ge=0, le=100)
+    completeness: int = Field(..., ge=0, le=100)
+    developer_value: int = Field(..., ge=0, le=100)
+    overall: int = Field(..., ge=0, le=100)
+    feedback: str
+
+
+# ---------------------------------------------------------------------------
+# API request / response models
+# ---------------------------------------------------------------------------
+
 class QuestionRequest(BaseModel):
     """Request model for asking a question."""
     

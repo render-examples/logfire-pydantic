@@ -26,9 +26,7 @@ help:
 
 install:
 	@echo "📦 Installing Python dependencies..."
-	python3 -m venv venv
-	. venv/bin/activate && pip install --upgrade pip
-	. venv/bin/activate && pip install -r requirements.txt
+	uv sync --group dev
 	@echo ""
 	@echo "📦 Installing Node.js dependencies..."
 	cd frontend && npm install
@@ -79,24 +77,24 @@ db-reset:
 
 ingest:
 	@echo "🔄 Generating embeddings for Render documentation..."
-	. venv/bin/activate && python data/scripts/generate_embeddings.py
+	uv run python data/scripts/generate_embeddings.py
 	@echo ""
 	@echo "📊 Loading embeddings into database..."
-	. venv/bin/activate && python data/scripts/ingest_docs.py
+	uv run python data/scripts/ingest_docs.py
 	@echo "✅ Documentation ingested!"
 
 add-pricing:
 	@echo "🏷️  Adding Render pricing page to vector database..."
 	@echo "This adds accurate pricing tables for all Render services"
 	@echo ""
-	. venv/bin/activate && python data/scripts/add_pricing_page.py
+	uv run python data/scripts/add_pricing_page.py
 	@echo "✅ Pricing data added!"
 
 run-backend:
 	@echo "🚀 Starting backend API on http://localhost:8000"
 	@echo "📖 API docs: http://localhost:8000/docs"
 	@echo ""
-	. venv/bin/activate && uvicorn backend.main:app --reload --port 8000
+	uv run uvicorn backend.main:app --reload --port 8000
 
 run-frontend:
 	@echo "🎨 Starting frontend on http://localhost:3000"
@@ -105,11 +103,11 @@ run-frontend:
 
 test:
 	@echo "🧪 Running tests..."
-	. venv/bin/activate && cd backend && pytest tests/ -v
+	uv run pytest backend/tests/ -v
 
 clean:
 	@echo "🧹 Cleaning up..."
-	rm -rf venv
+	rm -rf .venv
 	rm -rf frontend/node_modules
 	rm -rf frontend/.next
 	rm -rf frontend/out

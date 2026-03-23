@@ -55,9 +55,9 @@ EMBEDDING_DIMENSIONS=1536                # Embedding vector dimensions
 
 # Model Selection
 ANSWER_MODEL=claude-sonnet-4-5-20250929  # Primary answer generation model
-CLAIMS_MODEL=gpt-4o-mini                 # Claims extraction model
+CLAIMS_MODEL=gpt-5.4-mini                # Claims extraction model
 ACCURACY_MODEL=claude-sonnet-4-20250514  # Accuracy checking model
-EVAL_MODEL_OPENAI=gpt-4o-mini            # OpenAI evaluator model
+EVAL_MODEL_OPENAI=gpt-5.4-mini           # OpenAI evaluator model
 EVAL_MODEL_ANTHROPIC=claude-sonnet-4-20250514  # Anthropic evaluator model
 
 # Performance Settings
@@ -98,9 +98,9 @@ class PipelineConfig:
     
     # Model selection
     ANSWER_MODEL = "claude-sonnet-4-5-20250929"
-    CLAIMS_MODEL = "gpt-4o-mini"
+    CLAIMS_MODEL = "gpt-5.4-mini"
     ACCURACY_MODEL = "claude-sonnet-4-20250514"
-    EVAL_MODELS = ["gpt-4o-mini", "claude-sonnet-4-20250514"]
+    EVAL_MODELS = ["gpt-5.4-mini", "claude-sonnet-4-20250514"]
 ```
 
 ---
@@ -118,8 +118,7 @@ class PipelineConfig:
 "text-embedding-ada-002"    # Legacy model, not recommended
 
 # Chat models
-"gpt-4o"                    # Most capable, expensive
-"gpt-4o-mini"               # Recommended, good balance
+"gpt-5.4-mini"              # Latest, recommended
 "gpt-4-turbo"               # Previous generation
 "gpt-3.5-turbo"             # Cheapest, lower quality
 ```
@@ -139,7 +138,7 @@ class PipelineConfig:
 ```python
 ANSWER_MODEL = "claude-haiku-4"          # Cheapest Claude
 CLAIMS_MODEL = "gpt-3.5-turbo"           # Cheapest OpenAI
-ACCURACY_MODEL = "gpt-4o-mini"           # Balance
+ACCURACY_MODEL = "gpt-5.4-mini"          # Balance
 EVAL_MODEL_OPENAI = "gpt-3.5-turbo"
 EVAL_MODEL_ANTHROPIC = "claude-haiku-4"
 ```
@@ -147,18 +146,18 @@ EVAL_MODEL_ANTHROPIC = "claude-haiku-4"
 **Quality-Optimized:**
 ```python
 ANSWER_MODEL = "claude-opus-4"           # Best Anthropic
-CLAIMS_MODEL = "gpt-4o"                  # Best OpenAI for structured output
+CLAIMS_MODEL = "gpt-5.4-mini"            # Best OpenAI for structured output
 ACCURACY_MODEL = "claude-sonnet-4-5-20250929"
-EVAL_MODEL_OPENAI = "gpt-4o"
+EVAL_MODEL_OPENAI = "gpt-5.4-mini"
 EVAL_MODEL_ANTHROPIC = "claude-opus-4"
 ```
 
 **Balanced (Default):**
 ```python
 ANSWER_MODEL = "claude-sonnet-4-5-20250929"  # Good balance
-CLAIMS_MODEL = "gpt-4o-mini"                 # Fast and cheap
+CLAIMS_MODEL = "gpt-5.4-mini"                # Fast and cheap
 ACCURACY_MODEL = "claude-sonnet-4-20250514"  # Reliable
-EVAL_MODEL_OPENAI = "gpt-4o-mini"
+EVAL_MODEL_OPENAI = "gpt-5.4-mini"
 EVAL_MODEL_ANTHROPIC = "claude-sonnet-4-20250514"
 ```
 
@@ -279,7 +278,7 @@ ENABLE_ACCURACY_CHECK = False
 # Use cheaper models
 ANSWER_MODEL = "claude-haiku-4"
 CLAIMS_MODEL = "gpt-3.5-turbo"
-ACCURACY_MODEL = "gpt-4o-mini"
+ACCURACY_MODEL = "gpt-5.4-mini"
 
 # Reduce token limits
 MAX_TOKENS = 1000
@@ -300,7 +299,7 @@ CACHE_TTL_SECONDS = 3600  # 1 hour
 ```python
 # Use best models
 ANSWER_MODEL = "claude-opus-4"
-CLAIMS_MODEL = "gpt-4o"
+CLAIMS_MODEL = "gpt-5.4-mini"
 ACCURACY_MODEL = "claude-sonnet-4-5-20250929"
 
 # Increase token limits

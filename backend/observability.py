@@ -21,8 +21,8 @@ logfire.configure(
 )
 
 # Auto-instrument libraries globally
-logfire.instrument_openai()       # Instruments all OpenAI clients
-logfire.instrument_anthropic()    # Instruments all Anthropic clients
+logfire.instrument_openai()       # Instruments direct OpenAI clients (embeddings.py)
+logfire.instrument_pydantic_ai()  # Instruments pydantic-ai agents (all LLM pipeline stages)
 logfire.instrument_asyncpg()      # Database queries
 logfire.instrument_httpx()        # HTTP client requests
 logfire.instrument_system_metrics()  # System metrics (CPU, memory, swap)
@@ -151,33 +151,39 @@ def calculate_embedding_cost(tokens: int) -> float:
 def calculate_openai_cost(input_tokens: int, output_tokens: int, model: str) -> float:
     """Calculate cost for OpenAI API calls."""
     from backend.config import PipelineConfig
-    
-    if "gpt-4o-mini" in model:
+
+    if "gpt-4o-mini" in model or "gpt-5.4-mini" in model:
         input_cost = (input_tokens / 1_000_000) * PipelineConfig.GPT4O_MINI_INPUT_COST_PER_M
         output_cost = (output_tokens / 1_000_000) * PipelineConfig.GPT4O_MINI_OUTPUT_COST_PER_M
+    elif "gpt-4o" in model:
+        input_cost = (input_tokens / 1_000_000) * PipelineConfig.GPT4O_INPUT_COST_PER_M
+        output_cost = (output_tokens / 1_000_000) * PipelineConfig.GPT4O_OUTPUT_COST_PER_M
     else:
         # Default to GPT-4o-mini rates
         input_cost = (input_tokens / 1_000_000) * PipelineConfig.GPT4O_MINI_INPUT_COST_PER_M
         output_cost = (output_tokens / 1_000_000) * PipelineConfig.GPT4O_MINI_OUTPUT_COST_PER_M
-    
+
     return input_cost + output_cost
 
 
 def calculate_anthropic_cost(input_tokens: int, output_tokens: int, model: str) -> float:
     """Calculate cost for Anthropic API calls."""
     from backend.config import PipelineConfig
-    
-    if "sonnet-4-5" in model or "sonnet-4.5" in model:
+
+    if "sonnet-4-6" in model or "sonnet-4.6" in model:
+        input_cost = (input_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_46_INPUT_COST_PER_M
+        output_cost = (output_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_46_OUTPUT_COST_PER_M
+    elif "sonnet-4-5" in model or "sonnet-4.5" in model:
         input_cost = (input_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_45_INPUT_COST_PER_M
         output_cost = (output_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_45_OUTPUT_COST_PER_M
     elif "sonnet-4" in model:
         input_cost = (input_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_4_INPUT_COST_PER_M
         output_cost = (output_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_4_OUTPUT_COST_PER_M
     else:
-        # Default to Sonnet 4 rates
-        input_cost = (input_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_4_INPUT_COST_PER_M
-        output_cost = (output_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_4_OUTPUT_COST_PER_M
-    
+        # Default to Sonnet 4.6 rates
+        input_cost = (input_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_46_INPUT_COST_PER_M
+        output_cost = (output_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_46_OUTPUT_COST_PER_M
+
     return input_cost + output_cost
 
 

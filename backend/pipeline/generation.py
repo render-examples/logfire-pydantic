@@ -1,7 +1,9 @@
 """Stage 3: Answer Generation."""
 
 from typing import List, Optional
-from anthropic import AsyncAnthropic
+from pydantic_ai import Agent
+from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
 
 from backend.config import settings, PipelineConfig
 from backend.models import Document
@@ -9,18 +11,7 @@ from backend.observability import instrument_stage, calculate_anthropic_cost
 import logfire
 
 
-# Initialize Anthropic client (auto-instrumented by logfire.instrument_anthropic() in observability.py)
-anthropic_client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-
-
-ANSWER_GENERATION_PROMPT = """You are a helpful technical assistant specializing in Render's cloud platform. Your role is to provide accurate, clear, and actionable answers to developer questions.
-
-Context from Render documentation:
-{context}
-
-User Question: {question}
-
-{feedback}
+ANSWER_GENERATION_INSTRUCTIONS = """You are a helpful technical assistant specializing in Render's cloud platform. Your role is to provide accurate, clear, and actionable answers to developer questions.
 
 ⚠️ CRITICAL: NO HEDGING ALLOWED ⚠️
 You have been provided with 20 documents of relevant context. If the answer is in the context, STATE IT CONFIDENTLY.
@@ -72,12 +63,6 @@ VALIDATION CHECKLIST before answering:
 - [ ] I checked ALL 20 documents thoroughly before claiming information is missing
 - [ ] I am NOT using hedging language like "doesn't specify" when the info IS in the context
 
-Please provide a comprehensive answer that:
-1. Uses ONLY information from the provided context
-2. States facts CONFIDENTLY when they appear in the documentation (no unnecessary hedging!)
-3. Lists specific plans, tiers, features, and limits found in the context
-4. Only says "not specified" if genuinely absent from ALL 20 documents after thorough review
-
 **PRICING & PLANS INSTRUCTIONS (CRITICAL):**
 When answering questions about pricing, plans, tiers, or costs:
 1. **PRIORITIZE documents with "Source: https://render.com/pricing"** - These contain authoritative pricing tables
@@ -86,9 +71,12 @@ When answering questions about pricing, plans, tiers, or costs:
 4. Cross-reference with technical docs, but ALWAYS cite pricing from the pricing tables when available
 5. If pricing tables show a plan (e.g., "Standard | $32/month | 1 GB"), state it confidently - don't say it's "not specified"
 
-Example: For "What Key Value plans exist?", check documents from render.com/pricing FIRST before checking other docs.
+Example: For "What Key Value plans exist?", check documents from render.com/pricing FIRST before checking other docs."""
 
-Answer:"""
+_answer_agent = Agent(
+    AnthropicModel(settings.answer_model, provider=AnthropicProvider(api_key=settings.anthropic_api_key)),
+    instructions=ANSWER_GENERATION_INSTRUCTIONS,
+)
 
 
 @instrument_stage(PipelineConfig.STAGE_GENERATION)
@@ -99,16 +87,16 @@ async def generate_answer(
 ) -> dict:
     """
     Generate comprehensive answer using retrieved context.
-    
+
     Args:
         question: The user's question
         documents: Retrieved documentation chunks
         feedback: Optional feedback from previous iteration
-        
+
     Returns:
         dict with 'answer', 'input_tokens', 'output_tokens', 'cost_usd'
     """
-    
+
     logfire.info(
         "Generating answer with Claude",
         num_documents=len(documents),
@@ -116,7 +104,7 @@ async def generate_answer(
         has_feedback=feedback is not None,
         model=settings.answer_model
     )
-    
+
     # Prepare context from documents
     context_parts = []
     for i, doc in enumerate(documents, 1):
@@ -127,10 +115,10 @@ async def generate_answer(
             f"Source: {doc.source}\n"
             f"Content: {doc.content}\n"
         )
-    
+
     context = "\n\n".join(context_parts)
-    
-    # Add feedback if this is a refinement iteration
+
+    # Build the user prompt
     feedback_text = ""
     if feedback:
         feedback_text = f"""
@@ -150,41 +138,42 @@ Feedback from quality check:
 - When in doubt, be LESS comprehensive but MORE accurate
 
 Please revise your answer based on this feedback while maintaining strict accuracy."""
-    
-    # Generate answer with Claude
-    prompt = ANSWER_GENERATION_PROMPT.format(
-        context=context,
-        question=question,
-        feedback=feedback_text
+
+    user_prompt = f"""Context from Render documentation:
+{context}
+
+User Question: {question}
+{feedback_text}
+
+Please provide a comprehensive answer that:
+1. Uses ONLY information from the provided context
+2. States facts CONFIDENTLY when they appear in the documentation (no unnecessary hedging!)
+3. Lists specific plans, tiers, features, and limits found in the context
+4. Only says "not specified" if genuinely absent from ALL 20 documents after thorough review
+
+Answer:"""
+
+    result = await _answer_agent.run(
+        user_prompt,
+        model_settings={"temperature": 0.3, "max_tokens": settings.max_tokens},
     )
-    
-    response = await anthropic_client.messages.create(
-        model=settings.answer_model,
-        max_tokens=settings.max_tokens,
-        temperature=0.3,
-        messages=[{
-            "role": "user",
-            "content": prompt
-        }]
-    )
-    
-    answer = response.content[0].text
-    input_tokens = response.usage.input_tokens
-    output_tokens = response.usage.output_tokens
+
+    usage = result.usage()
+    input_tokens = usage.request_tokens or 0
+    output_tokens = usage.response_tokens or 0
     cost_usd = calculate_anthropic_cost(input_tokens, output_tokens, settings.answer_model)
-    
+
     logfire.info(
         "Answer generated",
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_usd=cost_usd,
-        answer_length=len(answer)
+        answer_length=len(result.output)
     )
-    
+
     return {
-        "answer": answer,
+        "answer": result.output,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cost_usd": cost_usd
     }
-

@@ -34,11 +34,12 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 1536
     
     # Model Selection
-    answer_model: str = "claude-sonnet-4-5-20250929"
-    claims_model: str = "gpt-4o-mini"
-    accuracy_model: str = "claude-sonnet-4-20250514"
-    eval_model_openai: str = "gpt-4o-mini"
-    eval_model_anthropic: str = "claude-sonnet-4-20250514"
+    answer_model: str = "claude-sonnet-4-6"
+    claims_model: str = "gpt-5.4-mini"
+    accuracy_model: str = "claude-sonnet-4-6"
+    eval_model_openai: str = "gpt-5.4-mini"
+    eval_model_anthropic: str = "claude-sonnet-4-6"
+    query_expansion_model: str = "gpt-5.4-mini"
     
     # Performance
     enable_caching: bool = True
@@ -55,6 +56,10 @@ class PipelineConfig:
     EMBEDDING_COST_PER_M = 0.02  # text-embedding-3-small
     GPT4O_MINI_INPUT_COST_PER_M = 0.15
     GPT4O_MINI_OUTPUT_COST_PER_M = 0.60
+    GPT4O_INPUT_COST_PER_M = 2.50
+    GPT4O_OUTPUT_COST_PER_M = 10.00
+    CLAUDE_SONNET_46_INPUT_COST_PER_M = 3.00
+    CLAUDE_SONNET_46_OUTPUT_COST_PER_M = 15.00
     CLAUDE_SONNET_45_INPUT_COST_PER_M = 3.00
     CLAUDE_SONNET_45_OUTPUT_COST_PER_M = 15.00
     CLAUDE_SONNET_4_INPUT_COST_PER_M = 3.00

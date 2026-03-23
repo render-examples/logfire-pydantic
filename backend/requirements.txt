@@ -6,15 +6,12 @@ pydantic-settings==2.6.1
 typing-extensions>=4.12.2
 
 # AI & LLM
-langchain>=0.3.27
-langchain-openai>=0.3.35
-langchain-anthropic>=0.3.21
-langchain-postgres==0.0.12
+pydantic-ai>=0.0.14
 openai>=2.2.0
 anthropic>=0.69.0
 
 # Observability (with all instrumentation extras)
-logfire[system-metrics,asyncpg,httpx,openai,anthropic,fastapi]>=4.12.0
+logfire[system-metrics,asyncpg,httpx,openai,fastapi]>=4.12.0
 
 # Database & Vector Store
 pgvector>=0.2.5,<0.3.0
