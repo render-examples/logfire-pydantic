@@ -11,6 +11,8 @@ from fastapi.responses import StreamingResponse
 import logfire
 from opentelemetry import trace
 
+import asyncio
+
 from backend.config import settings
 from backend.models import (
     QuestionRequest,
@@ -21,6 +23,7 @@ from backend.models import (
 )
 from backend.database import vector_store
 from backend.observability import pipeline_trace, track_pipeline_metrics
+from backend.prices import load_prices
 from backend.pipeline import (
     embed_question,
     retrieve_documents,
@@ -41,6 +44,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logfire.info("Starting Render Q&A Assistant")
     await vector_store.initialize()
+    await load_prices()
     logfire.info("Application started successfully")
     
     yield
@@ -199,10 +203,15 @@ async def execute_pipeline(question: str, session_id: str = None) -> AnswerRespo
             stages.append(stage_result)
             total_cost += verification_result["cost_usd"]
             
-            # Stage 6: Technical Accuracy
-            accuracy_result = await check_accuracy(answer_text, verified_claims)
+            # Stages 6 + 7: Technical Accuracy and Quality Evaluation (run in parallel)
+            accuracy_result, eval_result = await asyncio.gather(
+                check_accuracy(answer_text, verified_claims),
+                evaluate_quality(question, answer_text, documents),
+            )
             accuracy_score = accuracy_result["accuracy_score"]
-            stage_result = PipelineStageResult(
+            evaluations = eval_result["evaluations"]
+            average_score = eval_result["average_score"]
+            stages.append(PipelineStageResult(
                 stage=f"technical_accuracy_iter_{current_iteration}",
                 success=True,
                 duration_ms=0,
@@ -212,15 +221,9 @@ async def execute_pipeline(question: str, session_id: str = None) -> AnswerRespo
                     "accuracy_score": accuracy_score,
                     "iteration": current_iteration
                 }
-            )
-            stages.append(stage_result)
+            ))
             total_cost += accuracy_result["cost_usd"]
-            
-            # Stage 7: Quality Evaluation
-            eval_result = await evaluate_quality(question, answer_text, documents)
-            evaluations = eval_result["evaluations"]
-            average_score = eval_result["average_score"]
-            stage_result = PipelineStageResult(
+            stages.append(PipelineStageResult(
                 stage=f"quality_evaluation_iter_{current_iteration}",
                 success=True,
                 duration_ms=0,
@@ -232,8 +235,7 @@ async def execute_pipeline(question: str, session_id: str = None) -> AnswerRespo
                     "agreement": eval_result.get("agreement_level", "unknown"),
                     "iteration": current_iteration
                 }
-            )
-            stages.append(stage_result)
+            ))
             total_cost += eval_result["cost_usd"]
             
             # Stage 8: Quality Gate
@@ -483,11 +485,14 @@ async def pipeline_generator(question: str, session_id: str = None) -> AsyncGene
                 
                 yield f"data: {json.dumps(ProgressUpdate(stage=f'verification_iter_{current_iteration}', status='completed', message=f'{verification_rate:.0f}% claims verified', progress=min(iter_progress_start + (0.60 * iter_span), 95), cost_so_far=total_cost).model_dump())}\n\n"
                 
-                # Stage 6: Accuracy
-                yield f"data: {json.dumps(ProgressUpdate(stage=f'accuracy_iter_{current_iteration}', status='started', message='Checking technical accuracy...', progress=min(iter_progress_start + (0.70 * iter_span), 95), cost_so_far=total_cost).model_dump())}\n\n"
-                
+                # Stages 6 + 7: Accuracy and Evaluation (run in parallel)
+                yield f"data: {json.dumps(ProgressUpdate(stage=f'accuracy_iter_{current_iteration}', status='started', message='Checking accuracy & quality in parallel...', progress=min(iter_progress_start + (0.70 * iter_span), 95), cost_so_far=total_cost).model_dump())}\n\n"
+
                 stage_start = time.time()
-                accuracy_result = await check_accuracy(answer_text, verified_claims)
+                accuracy_result, eval_result = await asyncio.gather(
+                    check_accuracy(answer_text, verified_claims),
+                    evaluate_quality(question, answer_text, documents),
+                )
                 stage_duration = (time.time() - stage_start) * 1000
                 accuracy_cost = accuracy_result["cost_usd"]
                 total_cost += accuracy_cost
@@ -502,15 +507,9 @@ async def pipeline_generator(question: str, session_id: str = None) -> AsyncGene
                         "iteration": current_iteration
                     }
                 ))
-                
+
                 yield f"data: {json.dumps(ProgressUpdate(stage=f'accuracy_iter_{current_iteration}', status='completed', message=f'Accuracy score: {accuracy_score}/100', progress=min(iter_progress_start + (0.80 * iter_span), 95), cost_so_far=total_cost).model_dump())}\n\n"
-                
-                # Stage 7: Evaluation
-                yield f"data: {json.dumps(ProgressUpdate(stage=f'evaluation_iter_{current_iteration}', status='started', message='Evaluating quality...', progress=min(iter_progress_start + (0.85 * iter_span), 95), cost_so_far=total_cost).model_dump())}\n\n"
-                
-                stage_start = time.time()
-                eval_result = await evaluate_quality(question, answer_text, documents)
-                stage_duration = (time.time() - stage_start) * 1000
+
                 eval_cost = eval_result["cost_usd"]
                 total_cost += eval_cost
                 evaluations = eval_result["evaluations"]
@@ -528,7 +527,7 @@ async def pipeline_generator(question: str, session_id: str = None) -> AsyncGene
                         "iteration": current_iteration
                     }
                 ))
-                
+
                 yield f"data: {json.dumps(ProgressUpdate(stage=f'evaluation_iter_{current_iteration}', status='completed', message=f'Quality score: {average_score:.1f}/100', progress=min(iter_progress_start + (0.90 * iter_span), 95), cost_so_far=total_cost).model_dump())}\n\n"
                 
                 # Stage 8: Quality Gate

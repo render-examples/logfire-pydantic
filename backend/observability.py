@@ -144,47 +144,26 @@ async def pipeline_trace(question: str):
 
 def calculate_embedding_cost(tokens: int) -> float:
     """Calculate cost for embedding API calls."""
-    from backend.config import PipelineConfig
-    return (tokens / 1_000_000) * PipelineConfig.EMBEDDING_COST_PER_M
+    from backend.prices import get_price
+    from backend.config import settings
+    price = get_price(settings.embedding_model)
+    return (tokens / 1_000_000) * price.input_cost_per_m
 
 
 def calculate_openai_cost(input_tokens: int, output_tokens: int, model: str) -> float:
     """Calculate cost for OpenAI API calls."""
-    from backend.config import PipelineConfig
-
-    if "gpt-4o-mini" in model or "gpt-5.4-mini" in model:
-        input_cost = (input_tokens / 1_000_000) * PipelineConfig.GPT54_MINI_INPUT_COST_PER_M
-        output_cost = (output_tokens / 1_000_000) * PipelineConfig.GPT54_MINI_OUTPUT_COST_PER_M
-    elif "gpt-4o" in model:
-        input_cost = (input_tokens / 1_000_000) * PipelineConfig.GPT4O_INPUT_COST_PER_M
-        output_cost = (output_tokens / 1_000_000) * PipelineConfig.GPT4O_OUTPUT_COST_PER_M
-    else:
-        # Default to gpt-5.4-mini rates
-        input_cost = (input_tokens / 1_000_000) * PipelineConfig.GPT54_MINI_INPUT_COST_PER_M
-        output_cost = (output_tokens / 1_000_000) * PipelineConfig.GPT54_MINI_OUTPUT_COST_PER_M
-
-    return input_cost + output_cost
+    from backend.prices import get_price
+    price = get_price(model)
+    return (input_tokens / 1_000_000) * price.input_cost_per_m + \
+           (output_tokens / 1_000_000) * price.output_cost_per_m
 
 
 def calculate_anthropic_cost(input_tokens: int, output_tokens: int, model: str) -> float:
     """Calculate cost for Anthropic API calls."""
-    from backend.config import PipelineConfig
-
-    if "sonnet-4-6" in model or "sonnet-4.6" in model:
-        input_cost = (input_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_46_INPUT_COST_PER_M
-        output_cost = (output_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_46_OUTPUT_COST_PER_M
-    elif "sonnet-4-5" in model or "sonnet-4.5" in model:
-        input_cost = (input_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_45_INPUT_COST_PER_M
-        output_cost = (output_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_45_OUTPUT_COST_PER_M
-    elif "sonnet-4" in model:
-        input_cost = (input_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_4_INPUT_COST_PER_M
-        output_cost = (output_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_4_OUTPUT_COST_PER_M
-    else:
-        # Default to Sonnet 4.6 rates
-        input_cost = (input_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_46_INPUT_COST_PER_M
-        output_cost = (output_tokens / 1_000_000) * PipelineConfig.CLAUDE_SONNET_46_OUTPUT_COST_PER_M
-
-    return input_cost + output_cost
+    from backend.prices import get_price
+    price = get_price(model)
+    return (input_tokens / 1_000_000) * price.input_cost_per_m + \
+           (output_tokens / 1_000_000) * price.output_cost_per_m
 
 
 def track_pipeline_metrics(

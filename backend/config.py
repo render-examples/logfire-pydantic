@@ -51,20 +51,7 @@ class Settings(BaseSettings):
 
 class PipelineConfig:
     """Static pipeline configuration constants."""
-    
-    # Cost per 1M tokens (in USD)
-    EMBEDDING_COST_PER_M = 0.02  # text-embedding-3-small
-    GPT54_MINI_INPUT_COST_PER_M = 0.15
-    GPT54_MINI_OUTPUT_COST_PER_M = 0.60
-    GPT4O_INPUT_COST_PER_M = 2.50
-    GPT4O_OUTPUT_COST_PER_M = 10.00
-    CLAUDE_SONNET_46_INPUT_COST_PER_M = 3.00
-    CLAUDE_SONNET_46_OUTPUT_COST_PER_M = 15.00
-    CLAUDE_SONNET_45_INPUT_COST_PER_M = 3.00
-    CLAUDE_SONNET_45_OUTPUT_COST_PER_M = 15.00
-    CLAUDE_SONNET_4_INPUT_COST_PER_M = 3.00
-    CLAUDE_SONNET_4_OUTPUT_COST_PER_M = 15.00
-    
+
     # Stage names for tracing
     STAGE_EMBEDDING = "question_embedding"
     STAGE_RETRIEVAL = "rag_retrieval"
