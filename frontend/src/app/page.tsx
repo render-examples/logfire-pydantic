@@ -56,7 +56,7 @@ export default function Home() {
     <div className="relative z-10 min-h-screen bg-black flex flex-col">
       {/* Header */}
       <header className="sticky top-0 z-20 border-b border-zinc-800 bg-black/90 backdrop-blur-sm flex-shrink-0">
-        <div className="w-full px-4 sm:px-8 lg:px-12 h-24 flex items-center justify-between">
+        <div className="w-full px-4 sm:px-8 lg:px-12 h-24 flex items-end justify-between pb-3">
           <div className="flex flex-col gap-2 items-start">
             <h1 className="title-gradient text-4xl font-bold tracking-tight leading-none">
               Ask Render Anything
@@ -65,7 +65,7 @@ export default function Home() {
               Observable RAG pipeline • Multi-query retrieval • Claims verification
             </p>
           </div>
-          <span className="text-sm text-zinc-500 hidden sm:flex items-center gap-1">
+          <span className="text-sm text-zinc-400 hidden sm:flex items-center gap-1">
             Powered by{' '}
             <a
               href="https://ai.pydantic.dev/"

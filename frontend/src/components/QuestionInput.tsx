@@ -29,9 +29,9 @@ export default function QuestionInput({ onSubmit, loading, onHistoryToggle }: Qu
   }
 
   const exampleQuestions = [
+    "How do I deploy an AI agent on Render?",
     "How do I deploy a Node.js app on Render?",
     "What database plans does Render offer?",
-    "How do I set up environment variables?",
     "How does autoscaling work on Render?",
   ]
 
@@ -59,8 +59,8 @@ export default function QuestionInput({ onSubmit, loading, onHistoryToggle }: Qu
           <textarea
             id="question"
             rows={4}
-            className="w-full px-4 py-3 bg-zinc-900 border border-zinc-700 text-white placeholder-zinc-500 focus:outline-none hover:border-zinc-600 focus:border-purple-600 resize-none transition-all duration-200"
-            placeholder="e.g., How do I deploy a Python FastAPI app on Render?"
+            className="w-full px-4 py-3 bg-transparent border border-zinc-700 text-white placeholder-zinc-500 hover:border-zinc-600 resize-none transition-all duration-200 neon-focus"
+            placeholder="> How do I deploy an AI agent on Render?"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -75,7 +75,7 @@ export default function QuestionInput({ onSubmit, loading, onHistoryToggle }: Qu
         <button
           type="submit"
           disabled={loading || !question.trim()}
-          className="w-full px-6 py-3 bg-purple-600 text-white font-medium border border-purple-600 hover:bg-purple-700 hover:border-purple-700 hover:shadow-[0_0_20px_rgba(139,92,246,0.3)] focus:outline-none focus:border-purple-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+          className="w-full px-6 py-3 bg-purple-600 text-white font-medium border border-purple-600 hover:bg-purple-700 hover:border-purple-700 hover:shadow-[0_0_15px_#00fff0,0_0_30px_rgba(0,255,240,0.25)] focus:outline-none focus:border-purple-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
         >
           {loading ? (
             <span className="flex items-center justify-center">
@@ -99,7 +99,7 @@ export default function QuestionInput({ onSubmit, loading, onHistoryToggle }: Qu
               key={idx}
               onClick={() => { setQuestion(exampleQ); onSubmit(exampleQ) }}
               disabled={loading}
-              className="text-left px-3 py-2 text-sm text-zinc-300 bg-zinc-900 hover:bg-zinc-800/80 border border-zinc-700 hover:border-purple-800 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="text-left px-3 py-2 text-sm text-zinc-300 bg-transparent hover:bg-zinc-900/40 border border-zinc-700 hover:border-purple-800 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {exampleQ}
             </button>

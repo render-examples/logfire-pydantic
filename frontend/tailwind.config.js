@@ -28,7 +28,9 @@ export default {
           purple: '#6c5ce7',
           blue: '#0984e3',
           green: '#00b894',
-        }
+        },
+        neon: '#00fff0',
+        hotpink: '#ff00cc',
       },
       animation: {
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',

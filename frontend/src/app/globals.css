@@ -36,8 +36,8 @@ body::after {
     0deg,
     transparent,
     transparent 2px,
-    rgba(0, 0, 0, 0.03) 2px,
-    rgba(0, 0, 0, 0.03) 4px
+    rgba(0, 0, 0, 0.055) 2px,
+    rgba(0, 0, 0, 0.055) 4px
   );
   pointer-events: none;
   z-index: 0;
@@ -69,6 +69,51 @@ body::after {
   100% { background-position: 0% 50%; }
 }
 
+/* Cyberpunk glitch — fires at the tail of a 10s cycle, feels random */
+@keyframes glitch {
+  0%, 85%, 100% {
+    filter: none;
+    transform: none;
+    clip-path: none;
+  }
+  86% {
+    filter: hue-rotate(180deg) brightness(1.3) saturate(2);
+    transform: translateX(-4px) skewX(-3deg);
+    clip-path: polygon(0 15%, 100% 15%, 100% 38%, 0 38%);
+  }
+  87.5% {
+    filter: hue-rotate(270deg) brightness(1.5) saturate(3);
+    transform: translateX(4px) skewX(2deg);
+    clip-path: polygon(0 58%, 100% 58%, 100% 82%, 0 82%);
+  }
+  89% {
+    filter: hue-rotate(90deg) brightness(1.1);
+    transform: translateX(-2px);
+    clip-path: none;
+  }
+  90% {
+    filter: none;
+    transform: none;
+  }
+}
+
+/* Neon cyan focus ring — pulsing glow on textarea focus */
+@keyframes neon-pulse {
+  0%, 100% {
+    box-shadow: 0 0 4px #00fff0, 0 0 10px rgba(0, 255, 240, 0.3), inset 0 0 4px rgba(0, 255, 240, 0.05);
+    border-color: #00fff0;
+  }
+  50% {
+    box-shadow: 0 0 8px #00fff0, 0 0 20px rgba(0, 255, 240, 0.5), inset 0 0 6px rgba(0, 255, 240, 0.08);
+    border-color: #00fff0;
+  }
+}
+
+.neon-focus:focus {
+  outline: none;
+  animation: neon-pulse 1.8s ease-in-out infinite;
+}
+
 .title-gradient {
   background: linear-gradient(
     135deg,
@@ -81,7 +126,17 @@ body::after {
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: gradient-shift 4s ease infinite;
+  animation: gradient-shift 4s ease infinite, glitch 10s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .title-gradient {
+    animation: none;
+  }
+  .neon-focus:focus {
+    animation: none;
+    box-shadow: 0 0 0 2px #00fff0;
+  }
 }
 
 @layer utilities {
