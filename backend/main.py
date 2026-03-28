@@ -22,12 +22,13 @@ from backend.models import (
     PipelineStageResult,
 )
 from backend.database import vector_store
-from backend.observability import pipeline_trace, track_pipeline_metrics
+from backend.observability import pipeline_trace, track_pipeline_metrics, calculate_anthropic_cost
 from backend.prices import load_prices
 from backend.pipeline import (
     embed_question,
     retrieve_documents,
     generate_answer,
+    stream_answer,
     extract_claims,
     verify_claims,
     check_accuracy,
@@ -424,27 +425,37 @@ async def pipeline_generator(question: str, session_id: str = None) -> AsyncGene
                 # Each iteration gets an equal share of the 60% progress (from 25% to 85%)
                 iter_span = 60 / settings.max_iterations
                 
-                # Stage 3: Generation
+                # Stage 3: Generation (streamed token-by-token)
                 yield f"data: {json.dumps(ProgressUpdate(stage=f'generation_iter_{current_iteration}', status='started', message=f'Generating answer (iteration {current_iteration})...', progress=min(iter_progress_start + (0.05 * iter_span), 95), cost_so_far=total_cost).model_dump())}\n\n"
-                
+
                 stage_start = time.time()
-                gen_result = await generate_answer(question, documents, feedback)
+                answer_text = ""
+                gen_usage = None
+                async for delta, usage in stream_answer(question, documents, feedback):
+                    if delta:
+                        answer_text += delta
+                        yield f"data: {json.dumps({'type': 'answer_token', 'delta': delta})}\n\n"
+                    elif usage is not None:
+                        gen_usage = usage
                 stage_duration = (time.time() - stage_start) * 1000
-                gen_cost = gen_result["cost_usd"]
+
+                input_tokens = (gen_usage.request_tokens or 0) if gen_usage else 0
+                output_tokens = (gen_usage.response_tokens or 0) if gen_usage else 0
+                gen_cost = calculate_anthropic_cost(input_tokens, output_tokens, settings.answer_model)
                 total_cost += gen_cost
-                answer_text = gen_result["answer"]
                 stages.append(PipelineStageResult(
                     stage=f"answer_generation_iter_{current_iteration}",
                     success=True,
                     duration_ms=stage_duration,
                     cost_usd=gen_cost,
+                    tokens_used=input_tokens + output_tokens,
                     model=settings.answer_model,
                     metadata={
                         "answer_length": len(answer_text),
                         "iteration": current_iteration
                     }
                 ))
-                
+
                 yield f"data: {json.dumps(ProgressUpdate(stage=f'generation_iter_{current_iteration}', status='completed', message='Answer generated', progress=min(iter_progress_start + (0.20 * iter_span), 95), cost_so_far=total_cost).model_dump())}\n\n"
                 
                 # Stage 4: Claims

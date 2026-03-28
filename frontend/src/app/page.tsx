@@ -1,6 +1,8 @@
 'use client'
 
 import { useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import QuestionInput from '@/components/QuestionInput'
 import ProgressTracker from '@/components/ProgressTracker'
 import AnswerDisplay from '@/components/AnswerDisplay'
@@ -14,6 +16,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState<ProgressUpdate[]>([])
   const [answer, setAnswer] = useState<AnswerResponse | null>(null)
+  const [streamingAnswer, setStreamingAnswer] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
 
@@ -21,12 +24,19 @@ export default function Home() {
     setLoading(true)
     setProgress([])
     setAnswer(null)
+    setStreamingAnswer('')
     setError(null)
 
     try {
-      const result = await askQuestion(question, (update) => {
-        setProgress((prev) => [...prev, update])
-      })
+      const result = await askQuestion(
+        question,
+        (update) => {
+          setProgress((prev) => [...prev, update])
+        },
+        (delta) => {
+          setStreamingAnswer((prev) => prev + delta)
+        }
+      )
 
       setAnswer(result)
     } catch (err) {
@@ -124,6 +134,18 @@ export default function Home() {
 
             {loading && (
               <ProgressTracker progress={progress} loading={loading} />
+            )}
+
+            {loading && streamingAnswer && (
+              <div className="bg-black border border-zinc-800 overflow-hidden">
+                <div className="border-b border-zinc-800 bg-zinc-900 px-6 py-4">
+                  <h2 className="text-xl font-semibold text-white">Answer</h2>
+                  <p className="text-sm text-zinc-400 mt-1">Generating...</p>
+                </div>
+                <div className="px-6 py-6 prose prose-invert prose-sm max-w-none">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingAnswer}</ReactMarkdown>
+                </div>
+              </div>
             )}
 
             {answer && <AnswerDisplay answer={answer} />}

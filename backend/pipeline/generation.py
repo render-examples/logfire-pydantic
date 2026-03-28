@@ -1,6 +1,6 @@
 """Stage 3: Answer Generation."""
 
-from typing import List, Optional
+from typing import AsyncGenerator, List, Optional
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
@@ -177,3 +177,78 @@ Answer:"""
         "output_tokens": output_tokens,
         "cost_usd": cost_usd
     }
+
+
+async def stream_answer(
+    question: str,
+    documents: List[Document],
+    feedback: Optional[str] = None
+) -> AsyncGenerator[tuple[str, object], None]:
+    """
+    Stream answer tokens from Claude in real-time.
+
+    Yields (delta, None) for each text chunk, then ("", usage) as the final item.
+    """
+    # Build user prompt (same logic as generate_answer)
+    context_parts = []
+    for i, doc in enumerate(documents, 1):
+        doc_metadata = doc.metadata or {}
+        title = doc_metadata.get('title', 'Unknown')
+        context_parts.append(
+            f"[Document {i}] {title}\n"
+            f"Source: {doc.source}\n"
+            f"Content: {doc.content}\n"
+        )
+
+    context = "\n\n".join(context_parts)
+
+    feedback_text = ""
+    if feedback:
+        feedback_text = f"""
+Feedback from quality check:
+{feedback}
+
+⚠️ CRITICAL: When revising, DO NOT:
+- Invent features not explicitly in the provided context
+- Assume features from one product apply to another (e.g., Postgres features ≠ Key Value features)
+- Add plan names/tiers not mentioned in the documentation
+- Generalize "both support X" unless BOTH products explicitly support X in the context
+
+✅ DO:
+- ONLY add details that are explicitly in the provided documents
+- Keep product-specific features separate (clearly label "Postgres:" vs "Key Value:")
+- If adding details about a feature, quote the relevant doc section
+- When in doubt, be LESS comprehensive but MORE accurate
+
+Please revise your answer based on this feedback while maintaining strict accuracy."""
+
+    user_prompt = f"""Context from Render documentation:
+{context}
+
+User Question: {question}
+{feedback_text}
+
+Please provide a comprehensive answer that:
+1. Uses ONLY information from the provided context
+2. States facts CONFIDENTLY when they appear in the documentation (no unnecessary hedging!)
+3. Lists specific plans, tiers, features, and limits found in the context
+4. Only says "not specified" if genuinely absent from ALL 20 documents after thorough review
+
+Answer:"""
+
+    logfire.info(
+        "Streaming answer with Claude",
+        num_documents=len(documents),
+        question_length=len(question),
+        has_feedback=feedback is not None,
+        model=settings.answer_model
+    )
+
+    async with _answer_agent.run_stream(
+        user_prompt,
+        model_settings={"temperature": 0.3, "max_tokens": settings.max_tokens},
+    ) as result:
+        async for delta in result.stream_text(delta=True):
+            yield delta, None
+        usage = result.usage()
+        yield "", usage

@@ -8,11 +8,12 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL
 
 export async function askQuestion(
   question: string,
-  onProgress?: (update: ProgressUpdate) => void
+  onProgress?: (update: ProgressUpdate) => void,
+  onAnswerToken?: (delta: string) => void
 ): Promise<AnswerResponse> {
   if (onProgress) {
     // Use streaming endpoint
-    return askQuestionStream(question, onProgress)
+    return askQuestionStream(question, onProgress, onAnswerToken)
   } else {
     // Use regular endpoint
     const response = await fetch(`${API_BASE_URL}/ask`, {
@@ -33,7 +34,8 @@ export async function askQuestion(
 
 async function askQuestionStream(
   question: string,
-  onProgress: (update: ProgressUpdate) => void
+  onProgress: (update: ProgressUpdate) => void,
+  onAnswerToken?: (delta: string) => void
 ): Promise<AnswerResponse> {
   const response = await fetch(`${API_BASE_URL}/ask/stream`, {
     method: 'POST',
@@ -75,6 +77,8 @@ async function askQuestionStream(
           finalResult = data.result
         } else if (data.type === 'error') {
           throw new Error(data.message)
+        } else if (data.type === 'answer_token') {
+          onAnswerToken?.(data.delta)
         } else {
           // Progress update
           onProgress(data as ProgressUpdate)

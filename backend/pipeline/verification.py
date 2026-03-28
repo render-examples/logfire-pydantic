@@ -24,17 +24,12 @@ embedder = Embedder(
 )
 
 
-async def _verify_single_claim(claim_text: str) -> tuple[Claim, int]:
-    """Embed a single claim and check it against the vector store."""
-    result = await embedder.embed_query(claim_text)
-    embedding = list(result.embeddings[0])
-    claim_tokens = result.usage.input_tokens
-
-    # Search for supporting documents
+async def _verify_claim_with_embedding(claim_text: str, embedding: list) -> Claim:
+    """Check a claim against the vector store using a pre-computed embedding."""
     docs = await vector_store.similarity_search(
         query_embedding=embedding,
-        k=5,  # Top 5 docs for verification
-        threshold=0.3,  # Lower threshold to get candidates
+        k=5,
+        threshold=0.3,
     )
 
     verified = False
@@ -69,13 +64,12 @@ async def _verify_single_claim(claim_text: str) -> tuple[Claim, int]:
         f"verified_docs={len(supporting_docs)}, threshold={settings.verification_threshold}"
     )
 
-    claim = Claim(
+    return Claim(
         claim=claim_text,
         verified=verified,
         verification_score=verification_score,
         supporting_docs=supporting_docs,
     )
-    return claim, claim_tokens
 
 
 @instrument_stage(PipelineConfig.STAGE_VERIFICATION)
@@ -92,14 +86,15 @@ async def verify_claims(claims: List[str]) -> dict:
 
     logfire.info(f"Verifying {len(claims)} claims")
 
-    # Verify all claims in parallel
-    results = await asyncio.gather(*[_verify_single_claim(c) for c in claims])
+    # Batch embed all claims in a single API call
+    batch_result = await embedder.embed_documents(claims)
+    embeddings = [list(e) for e in batch_result.embeddings]
+    total_tokens = batch_result.usage.input_tokens
 
-    verified_claims: List[Claim] = []
-    total_tokens = 0
-    for claim, tokens in results:
-        verified_claims.append(claim)
-        total_tokens += tokens
+    # Verify all claims in parallel using pre-computed embeddings
+    verified_claims: List[Claim] = await asyncio.gather(*[
+        _verify_claim_with_embedding(c, e) for c, e in zip(claims, embeddings)
+    ])
 
     # Calculate costs
     cost_usd = calculate_embedding_cost(total_tokens) + (len(claims) * 0.0001)
