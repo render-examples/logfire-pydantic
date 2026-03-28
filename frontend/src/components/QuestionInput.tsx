@@ -8,6 +8,22 @@ interface QuestionInputProps {
   onHistoryToggle?: () => void
 }
 
+function sanitizeInput(raw: string): string {
+  // Strip null bytes and control characters (keep \n \t \r)
+  let s = raw.replace(/[\x00\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+  // Decode HTML entities using native DOM to prevent &lt;script&gt; bypass
+  const ta = document.createElement('textarea')
+  ta.innerHTML = s
+  s = ta.value
+  // Strip HTML tags
+  s = s.replace(/<[^>]*>/g, '')
+  // Strip orphaned angle brackets
+  s = s.replace(/[<>]/g, '')
+  // Collapse 3+ newlines to 2
+  s = s.replace(/\n{3,}/g, '\n\n')
+  return s
+}
+
 export default function QuestionInput({ onSubmit, loading, onHistoryToggle }: QuestionInputProps) {
   const [question, setQuestion] = useState('')
 
@@ -62,7 +78,7 @@ export default function QuestionInput({ onSubmit, loading, onHistoryToggle }: Qu
             className="w-full px-4 py-3 bg-transparent border border-zinc-700 text-white placeholder-zinc-500 hover:border-zinc-600 resize-none transition-all duration-200 neon-focus"
             placeholder="> How do I deploy an AI agent on Render?"
             value={question}
-            onChange={(e) => setQuestion(e.target.value)}
+            onChange={(e) => setQuestion(sanitizeInput(e.target.value))}
             onKeyDown={handleKeyDown}
             disabled={loading}
           />

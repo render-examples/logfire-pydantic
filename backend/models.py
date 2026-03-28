@@ -1,8 +1,10 @@
 """Pydantic models for the Q&A pipeline."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import datetime
+import re
+import html
 
 
 # ---------------------------------------------------------------------------
@@ -42,9 +44,26 @@ class EvaluationOutput(BaseModel):
 
 class QuestionRequest(BaseModel):
     """Request model for asking a question."""
-    
+
     question: str = Field(..., min_length=10, max_length=500, description="The question to answer")
     session_id: Optional[str] = Field(None, description="Optional session ID for conversation tracking")
+
+    @field_validator('question', mode='before')
+    @classmethod
+    def sanitize_question(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("question must be a string")
+        # Strip null bytes and non-printable control characters (keep \n \t \r)
+        v = re.sub(r'[\x00\x01-\x08\x0B\x0C\x0E-\x1F\x7F]', '', v)
+        # Decode HTML entities before stripping tags to prevent bypass via &lt;script&gt;
+        v = html.unescape(v)
+        # Strip HTML tags
+        v = re.sub(r'<[^>]*>', '', v)
+        # Strip orphaned angle brackets that survived tag stripping
+        v = re.sub(r'[<>]', '', v)
+        # Collapse 3+ consecutive newlines to 2
+        v = re.sub(r'\n{3,}', '\n\n', v)
+        return v.strip()
 
 
 class Document(BaseModel):
