@@ -10,6 +10,10 @@ models:
   - id: text-embedding-ada-002
     prices:
       input_mtok: 0.10
+  - id: gpt-4.1-nano
+    prices:
+      input_mtok: 0.10
+      output_mtok: 0.40
   - id: gpt-4o-mini
     prices:
       input_mtok: 0.15

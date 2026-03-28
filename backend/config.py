@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     accuracy_model: str = "claude-sonnet-4-6"
     eval_model_openai: str = "gpt-5.4-mini"
     eval_model_anthropic: str = "claude-sonnet-4-6"
-    query_expansion_model: str = "gpt-5.4-mini"
+    query_expansion_model: str = "gpt-4.1-nano"
     
     # Performance
     enable_caching: bool = True
