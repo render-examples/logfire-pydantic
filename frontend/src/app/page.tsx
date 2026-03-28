@@ -142,8 +142,9 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="border-t border-zinc-800 bg-black flex-shrink-0">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex items-center justify-center gap-6 text-sm text-zinc-500">
+        <div className="px-4 sm:px-6 lg:px-8 py-4">
+          <div className="flex items-center justify-between text-sm text-zinc-500">
+          <div className="flex items-center gap-6">
             <a
               href="https://ai.pydantic.dev/"
               target="_blank"
@@ -191,6 +192,8 @@ export default function Home() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
               </svg>
             </a>
+          </div>
+          <span>&copy; Render 2026</span>
           </div>
         </div>
       </footer>
