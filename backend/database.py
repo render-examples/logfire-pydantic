@@ -9,6 +9,13 @@ from backend.config import settings
 from backend.models import Document
 import logfire
 
+# Stable key for the schema-init advisory lock. Many instances may call
+# initialize() concurrently (ingest fan-out, gateway startup racing a QA run),
+# each re-running the full DDL. A transaction-scoped advisory lock on this key
+# serializes that block so concurrent CREATE OR REPLACE FUNCTION / CREATE TRIGGER
+# against shared catalog rows don't raise "tuple concurrently updated".
+_SCHEMA_INIT_LOCK_KEY = 0x70796167  # "pyag"
+
 
 class VectorStore:
     """PostgreSQL vector store with pgvector extension."""
@@ -30,107 +37,109 @@ class VectorStore:
         
         # Create tables and enable pgvector
         async with self.pool.acquire() as conn:
-            # Enable pgvector extension
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", _SCHEMA_INIT_LOCK_KEY)
+                # Enable pgvector extension
+                await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             
-            # Create documents table
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS documents (
-                    id SERIAL PRIMARY KEY,
-                    content TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    section TEXT,
-                    metadata JSONB DEFAULT '{}',
-                    embedding vector(1536),
-                    content_tsv tsvector,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
+                # Create documents table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS documents (
+                        id SERIAL PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        section TEXT,
+                        metadata JSONB DEFAULT '{}',
+                        embedding vector(1536),
+                        content_tsv tsvector,
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
             
-            # Create index for vector similarity search.
-            # HNSW (not IVFFlat): the old ivfflat index with lists=100 + pgvector's
-            # default probes=1 scanned only ~1% of rows per query, so the true nearest
-            # neighbor was frequently missed — claims went unverified even when a
-            # supporting chunk existed at cosine > 0.7. HNSW gives effectively exact
-            # recall at this corpus scale with no probe tuning.
-            await conn.execute("DROP INDEX IF EXISTS documents_embedding_idx")
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS documents_embedding_hnsw_idx
-                ON documents USING hnsw (embedding vector_cosine_ops)
-            """)
+                # Create index for vector similarity search.
+                # HNSW (not IVFFlat): the old ivfflat index with lists=100 + pgvector's
+                # default probes=1 scanned only ~1% of rows per query, so the true nearest
+                # neighbor was frequently missed — claims went unverified even when a
+                # supporting chunk existed at cosine > 0.7. HNSW gives effectively exact
+                # recall at this corpus scale with no probe tuning.
+                await conn.execute("DROP INDEX IF EXISTS documents_embedding_idx")
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS documents_embedding_hnsw_idx
+                    ON documents USING hnsw (embedding vector_cosine_ops)
+                """)
             
-            # Create index for source lookups
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS documents_source_idx 
-                ON documents(source)
-            """)
+                # Create index for source lookups
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS documents_source_idx 
+                    ON documents(source)
+                """)
             
-            # Create GIN index for full-text search
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS documents_content_tsv_idx 
-                ON documents USING gin(content_tsv)
-            """)
+                # Create GIN index for full-text search
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS documents_content_tsv_idx 
+                    ON documents USING gin(content_tsv)
+                """)
             
-            # Create trigger function for auto-updating tsvector
-            await conn.execute("""
-                CREATE OR REPLACE FUNCTION documents_tsvector_trigger() RETURNS trigger AS $$
-                BEGIN
-                    NEW.content_tsv := to_tsvector('english', 
-                        coalesce(NEW.title, '') || ' ' || 
-                        coalesce(NEW.section, '') || ' ' || 
-                        coalesce(NEW.content, '')
-                    );
-                    RETURN NEW;
-                END
-                $$ LANGUAGE plpgsql;
-            """)
+                # Create trigger function for auto-updating tsvector
+                await conn.execute("""
+                    CREATE OR REPLACE FUNCTION documents_tsvector_trigger() RETURNS trigger AS $$
+                    BEGIN
+                        NEW.content_tsv := to_tsvector('english', 
+                            coalesce(NEW.title, '') || ' ' || 
+                            coalesce(NEW.section, '') || ' ' || 
+                            coalesce(NEW.content, '')
+                        );
+                        RETURN NEW;
+                    END
+                    $$ LANGUAGE plpgsql;
+                """)
             
-            # Create trigger to auto-update tsvector on insert/update
-            await conn.execute("""
-                DROP TRIGGER IF EXISTS documents_tsvector_update ON documents;
+                # Create trigger to auto-update tsvector on insert/update
+                await conn.execute("""
+                    DROP TRIGGER IF EXISTS documents_tsvector_update ON documents;
                 
-                CREATE TRIGGER documents_tsvector_update 
-                BEFORE INSERT OR UPDATE ON documents
-                FOR EACH ROW 
-                EXECUTE FUNCTION documents_tsvector_trigger();
-            """)
+                    CREATE TRIGGER documents_tsvector_update 
+                    BEFORE INSERT OR UPDATE ON documents
+                    FOR EACH ROW 
+                    EXECUTE FUNCTION documents_tsvector_trigger();
+                """)
             
-            # Create sessions table for Q&A history
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS qa_sessions (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    question TEXT NOT NULL,
-                    answer TEXT NOT NULL,
-                    sources JSONB DEFAULT '[]',
-                    claims JSONB DEFAULT '[]',
-                    evaluations JSONB DEFAULT '[]',
-                    quality_score FLOAT NOT NULL,
-                    total_cost FLOAT NOT NULL,
-                    total_duration_ms FLOAT NOT NULL,
-                    trace_id TEXT,
-                    stages JSONB DEFAULT '[]',
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
+                # Create sessions table for Q&A history
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS qa_sessions (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        sources JSONB DEFAULT '[]',
+                        claims JSONB DEFAULT '[]',
+                        evaluations JSONB DEFAULT '[]',
+                        quality_score FLOAT NOT NULL,
+                        total_cost FLOAT NOT NULL,
+                        total_duration_ms FLOAT NOT NULL,
+                        trace_id TEXT,
+                        stages JSONB DEFAULT '[]',
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
             
-            # Migration: drop the legacy iterations column on existing databases.
-            # The refinement loop was removed (single linear pass), so sessions no
-            # longer track an iteration count. IF EXISTS keeps this idempotent and
-            # a no-op on fresh databases.
-            await conn.execute("ALTER TABLE qa_sessions DROP COLUMN IF EXISTS iterations")
+                # Migration: drop the legacy iterations column on existing databases.
+                # The refinement loop was removed (single linear pass), so sessions no
+                # longer track an iteration count. IF EXISTS keeps this idempotent and
+                # a no-op on fresh databases.
+                await conn.execute("ALTER TABLE qa_sessions DROP COLUMN IF EXISTS iterations")
 
-            # Create index for recent sessions
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS qa_sessions_created_at_idx
-                ON qa_sessions(created_at DESC)
-            """)
+                # Create index for recent sessions
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS qa_sessions_created_at_idx
+                    ON qa_sessions(created_at DESC)
+                """)
             
-            # Create index for trace_id lookups
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS qa_sessions_trace_id_idx 
-                ON qa_sessions(trace_id)
-            """)
+                # Create index for trace_id lookups
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS qa_sessions_trace_id_idx 
+                    ON qa_sessions(trace_id)
+                """)
         
         logfire.info("Database initialized successfully")
     
