@@ -29,7 +29,7 @@ This is an **AI-powered Q&A assistant for Render documentation**. Users can ask 
 ### User Experience
 
 1. **Ask a question** - "How do I deploy a Node.js app on Render?" or "What database plans are available?"
-2. **Watch the pipeline** - Track progress as the run moves through 8 stages (embedding → retrieval → generation → verification)
+2. **Watch the pipeline** - Track progress as the run moves through 7 stages (embedding → retrieval → generation → verification)
 3. **Get accurate answers** - Receive detailed responses with sources from Render docs
 4. **Quality guaranteed** - Every answer is verified for accuracy and rated by dual AI evaluators
 
@@ -65,7 +65,7 @@ The app answers questions about deployment, databases, pricing, configuration, n
 - **Cost Tracking** - Per-stage and per-execution cost attribution with custom metrics
 - **Multi-Model Evals** - Dual-rater quality assessment (OpenAI + Anthropic)
 - **Session Tracking** - End-to-end user journey with distributed tracing
-- **Custom Metrics** - Business-specific metrics (cost, quality, iterations)
+- **Custom Metrics** - Business-specific metrics (cost, quality, accuracy)
 - **SQL Queries** - Custom analytics on AI performance
 
 ### Pydantic Stack
@@ -94,7 +94,7 @@ This project is built end-to-end on the [Pydantic](https://pydantic.dev/) ecosys
 
 The pipeline no longer runs inside the web service. The web service is now a **thin
 FastAPI gateway** that triggers a **Render Workflows** run and polls it for the result;
-the 8-stage pipeline and ingestion execute as workflow tasks that fan out across instances.
+the 7-stage pipeline and ingestion execute as workflow tasks that fan out across instances.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -125,7 +125,6 @@ the 8-stage pipeline and ingestion execute as workflow tasks that fan out across
 │  │ [6] Technical Accuracy      (Claude)    ┐               │ │
 │  │ [7] Quality Rating          (OpenAI+    ├─ 3 parallel   │ │
 │  │                              Anthropic) ┘   subtasks    │ │
-│  │ [8] Quality Gate            (Pass or Iterate) in-process │ │
 │  └────────────────────────────────────────────────────────┘ │
 │  Ingestion: ingest_all → ingest_core, then 6 add_* in       │
 │             parallel (replaces the old serial preDeploy)    │
@@ -144,10 +143,11 @@ the 8-stage pipeline and ingestion execute as workflow tasks that fan out across
 ```
 
 > **Why hybrid?** Workflows aren't HTTP-facing, so a client (the gateway) triggers tasks
-> via the SDK and reads run status. Stages 1, 2, and 8 are cheap/data-dependent and stay
+> via the SDK and reads run status. Stages 1 and 2 are cheap/data-dependent and stay
 > in-process on the orchestrator; only the heavy, independently-retryable LLM stages are
 > promoted to their own tasks. Stages 6 + 7 run as three concurrent subtasks on separate
-> instances. See [`workflows/app.py`](./workflows/app.py).
+> instances. The pipeline is a single linear pass — there is no refinement loop. See
+> [`workflows/app.py`](./workflows/app.py).
 
 ### Project Structure
 
@@ -157,7 +157,7 @@ render-qa-assistant/
 │   ├── main.py                    # FastAPI gateway (triggers + polls workflow runs)
 │   ├── api/
 │   │   └── logs.py                # Logfire logs API endpoint
-│   ├── pipeline/                  # 8-stage pipeline implementation (reused by workflows)
+│   ├── pipeline/                  # 7-stage pipeline implementation (reused by workflows)
 │   ├── models.py                  # Pydantic models
 │   ├── database.py                # PostgreSQL + pgvector
 │   ├── observability.py           # Logfire configuration
@@ -452,10 +452,10 @@ exists (step 3):
 > linked to it, so the gateway and cron both pick up `WORKFLOW_SLUG` from a single edit.
 
 **Auto-filled, no action needed:** `DATABASE_URL` (injected from the database service) and the
-rest of `pydantic-agents-workflows-pipeline`'s config (`QUALITY_THRESHOLD`, `ACCURACY_THRESHOLD`, `AGREEMENT_THRESHOLD`,
-`MAX_ITERATIONS`, `MAX_TOKENS`, `TIMEOUT_SECONDS`, `RAG_TOP_K`, `SIMILARITY_THRESHOLD`,
-`VERIFICATION_THRESHOLD`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, the model-selection vars,
-`ENABLE_CACHING`, `LOG_LEVEL`) ship with sensible defaults in `render.yaml`.
+rest of `pydantic-agents-workflows-pipeline`'s config (`MAX_TOKENS`, `TIMEOUT_SECONDS`,
+`RAG_TOP_K`, `SIMILARITY_THRESHOLD`, `VERIFICATION_THRESHOLD`, `EMBEDDING_MODEL`,
+`EMBEDDING_DIMENSIONS`, the model-selection vars, `ENABLE_CACHING`, `LOG_LEVEL`) ship with
+sensible defaults in `render.yaml`.
 
 ### 5. Wire the frontend to the backend
 
@@ -521,15 +521,14 @@ injected, so the answer lands on: **the best way to run AI agents on Render is R
 │ Accuracy Check (Claude)        │ $0.0180  │   22%    │
 │ Quality Rating (Dual)          │ $0.0070  │    9%    │
 ├────────────────────────────────┼──────────┼──────────┤
-│ TOTAL (first iteration)        │ $0.0798  │  100%    │
+│ TOTAL                          │ $0.0798  │  100%    │
 └────────────────────────────────┴──────────┴──────────┘
 ```
 
 ### Performance Metrics
 
-- **Average Response Time:** 4.2 seconds (first iteration)
+- **Average Response Time:** 4.2 seconds
 - **P95 Response Time:** 8.7 seconds
-- **Iteration Rate:** 12% of questions require refinement
 - **Success Rate:** 95% accuracy (validated by dual evaluators)
 
 ### Quality Scores
@@ -545,7 +544,7 @@ injected, so the answer lands on: **the best way to run AI agents on Render is R
 
 ### Core Guides
 
-- **[docs/PIPELINE.md](./docs/PIPELINE.md)** - Detailed breakdown of the 8-stage pipeline
+- **[docs/PIPELINE.md](./docs/PIPELINE.md)** - Detailed breakdown of the 7-stage pipeline
 - **[docs/OBSERVABILITY.md](./docs/OBSERVABILITY.md)** - Comprehensive Logfire instrumentation guide
 - **[docs/CONFIGURATION.md](./docs/CONFIGURATION.md)** - All configuration options and tuning
 - **[docs/HYBRID_SEARCH.md](./docs/HYBRID_SEARCH.md)** - Technical deep-dive on hybrid search

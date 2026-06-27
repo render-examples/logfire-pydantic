@@ -15,8 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from backend.database import vector_store
-from backend.pipeline.embeddings import embed_question
+from curated_ingest import ingest_curated_markdown
 from dotenv import load_dotenv
 
 # crawl_tutorials lives alongside this script.
@@ -74,34 +73,19 @@ def build_content(tutorials: list[dict]) -> str:
 
 
 async def add_to_vector_store(content: str) -> None:
-    """Insert the tutorials-index document, replacing any prior copy."""
-    await vector_store.initialize()
+    """Insert the tutorials-index document, replacing any prior copy.
 
-    print("\nRemoving old tutorials-index documents...")
-    async with vector_store.pool.acquire() as conn:
-        result = await conn.execute(
-            "DELETE FROM documents WHERE source = $1", TUTORIALS_INDEX_SOURCE
-        )
-        print(f"   Deleted {int(result.split()[-1])} existing documents")
-
+    The index is a flat link list (no ##/### headings), so this falls back to
+    size-based chunking inside the shared helper.
+    """
     print("\nAdding tutorials-index document to vector store...")
-    embed_result = await embed_question(content)
-
-    await vector_store.insert_document(
+    await ingest_curated_markdown(
         content=content,
         source=TUTORIALS_INDEX_SOURCE,
         title="Render Tutorials",
-        embedding=embed_result["embedding"],
         section="Render Tutorials Index",
-        metadata={
-            "type": "tutorial_index",
-            "category": "tutorials",
-            "title": "Render Tutorials",
-        },
+        metadata={"type": "tutorial_index", "category": "tutorials"},
     )
-
-    await vector_store.close()
-    print("Successfully added the Render Tutorials index document!")
 
 
 async def main() -> None:

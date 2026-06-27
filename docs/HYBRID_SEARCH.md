@@ -65,8 +65,8 @@ CREATE TABLE documents (
 );
 
 -- Indexes
-CREATE INDEX documents_embedding_idx 
-    ON documents USING ivfflat (embedding vector_cosine_ops);
+CREATE INDEX documents_embedding_hnsw_idx
+    ON documents USING hnsw (embedding vector_cosine_ops);
 
 CREATE INDEX documents_content_tsv_idx 
     ON documents USING gin(content_tsv);

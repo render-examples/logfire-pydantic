@@ -15,8 +15,7 @@ from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from backend.database import vector_store
-from backend.pipeline.embeddings import embed_question
+from curated_ingest import ingest_curated_markdown
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -136,57 +135,25 @@ def build_document_content(scraped_text: str) -> str:
 
 
 async def add_to_vector_store(content: str):
-    """Add the Workflows agents tutorial document, replacing any prior copy.
+    """Add the Workflows agents tutorial, section-chunked, replacing any prior copy.
 
     Also removes the prior canonical AI-agent docs (the self-orchestrating-agents
     template and legacy voice-agent template) so the tutorial is the only context
     that surfaces for AI agent deployment questions.
     """
-    await vector_store.initialize()
-
-    print("\nRemoving prior AI-agent template documents...")
-    async with vector_store.pool.acquire() as conn:
-        for legacy_source in LEGACY_AI_AGENT_SOURCES:
-            result = await conn.execute("""
-                DELETE FROM documents
-                WHERE source = $1
-            """, legacy_source)
-            deleted_legacy = int(result.split()[-1])
-            print(f"   Deleted {deleted_legacy} documents from {legacy_source}")
-
-    print("\nRemoving old Workflows agents tutorial documents...")
-    async with vector_store.pool.acquire() as conn:
-        result = await conn.execute("""
-            DELETE FROM documents
-            WHERE source = $1
-        """, TUTORIAL_URL)
-        deleted_existing = int(result.split()[-1])
-        print(f"   Deleted {deleted_existing} existing documents")
-
-    print("\nAdding Workflows agents tutorial document to vector store...")
-
     if len(content) < 100:
         print("Error: Content too short, aborting")
-        await vector_store.close()
         return
 
-    embed_result = await embed_question(content)
-
-    await vector_store.insert_document(
+    print("\nAdding Workflows agents tutorial (section-aware) to vector store...")
+    await ingest_curated_markdown(
         content=content,
         source=TUTORIAL_URL,
         title="Run AI Agents on Render with Workflows",
-        embedding=embed_result["embedding"],
         section="AI Agent Deployment on Render",
-        metadata={
-            "type": "tutorial",
-            "category": "ai_agent",
-            "title": "Run AI Agents on Render with Workflows"
-        }
+        metadata={"type": "tutorial", "category": "ai_agent"},
+        also_delete=LEGACY_AI_AGENT_SOURCES,
     )
-
-    await vector_store.close()
-    print("Successfully added 1 Workflows agents tutorial document!")
 
 
 async def main():

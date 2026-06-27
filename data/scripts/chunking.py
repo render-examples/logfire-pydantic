@@ -6,10 +6,18 @@ by generate_embeddings.py and crawl_tutorials.py. Keeping this in one place mean
 the bulk-docs corpus and the tutorials crawl chunk content identically.
 """
 
+import re
 from typing import Dict, List, Optional
 
 MAX_CHUNK_CHARS = 2000
 MIN_CHUNK_CHARS = 100
+
+# Sections shorter than this are merged into the previous chunk rather than
+# becoming their own (a heading with almost no body isn't worth its own embedding).
+MERGE_FLOOR_CHARS = 60
+
+# Matches level-2 and level-3 ATX markdown headings (## / ###).
+_HEADING_RE = re.compile(r'^(#{2,3})\s+(.+?)\s*$', re.MULTILINE)
 
 
 def chunk_document(
@@ -77,5 +85,67 @@ def chunk_document(
 
     if current_chunk:
         docs.append(_doc(separator.join(current_chunk)))
+
+    return docs
+
+
+def chunk_markdown_by_heading(
+    title: str,
+    source: str,
+    content: str,
+    max_chars: int = MAX_CHUNK_CHARS,
+) -> List[Dict]:
+    """Split structured markdown into one chunk per ``##``/``###`` heading section.
+
+    Each heading section becomes its own focused embedding, so a specific fact
+    (e.g. "task runs can execute for up to 24 hours") isn't diluted inside a
+    page-sized chunk. This noticeably improves retrieval and claim-verification
+    recall for curated docs versus embedding the whole page as one vector.
+
+    Behavior:
+      - The heading text is kept in the chunk so its vocabulary stays searchable.
+      - Content before the first heading (typically an H1 title + a "Source:"
+        line) is dropped as preamble.
+      - Sections larger than ``max_chars`` fall back to size-based splitting via
+        ``chunk_document`` (heading preserved as the section label).
+      - Sections shorter than ``MERGE_FLOOR_CHARS`` are merged into the previous
+        chunk.
+      - Falls back entirely to ``chunk_document`` when the content has no
+        ``##``/``###`` headings.
+
+    Returns the same doc-dict shape as ``chunk_document``.
+    """
+    clean_content = content.strip()
+    if len(clean_content) < MIN_CHUNK_CHARS:
+        return []
+
+    matches = list(_HEADING_RE.finditer(clean_content))
+    if not matches:
+        return chunk_document(title, None, source, content, max_chars=max_chars)
+
+    docs: List[Dict] = []
+    for idx, match in enumerate(matches):
+        heading = match.group(2).strip()
+        body_start = match.end()
+        body_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(clean_content)
+        body = clean_content[body_start:body_end].strip()
+
+        section_text = f"## {heading}\n\n{body}".strip() if body else f"## {heading}"
+
+        # Merge tiny sections into the previous chunk instead of embedding them alone.
+        if len(section_text) < MERGE_FLOOR_CHARS and docs:
+            docs[-1]["content"] = f"{docs[-1]['content']}\n\n{section_text}"
+            continue
+
+        if len(section_text) <= max_chars:
+            docs.append({
+                "title": f"{title} - {heading}",
+                "section": heading,
+                "source": source,
+                "content": section_text,
+            })
+        else:
+            # Oversized section: size-split it while keeping the heading as the label.
+            docs.extend(chunk_document(title, heading, source, section_text, max_chars=max_chars))
 
     return docs

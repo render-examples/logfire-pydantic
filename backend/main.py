@@ -177,8 +177,8 @@ async def get_stats():
         "embedding_model": settings.embedding_model,
         "embedding_dimensions": settings.embedding_dimensions,
         "rag_top_k": settings.rag_top_k,
-        "quality_threshold": settings.quality_threshold,
-        "max_iterations": settings.max_iterations
+        "similarity_threshold": settings.similarity_threshold,
+        "relevance_cutoff_fraction": settings.relevance_cutoff_fraction,
     }
 
 

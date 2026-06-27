@@ -15,8 +15,7 @@ from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from backend.database import vector_store
-from backend.pipeline.embeddings import embed_question
+from curated_ingest import ingest_curated_markdown
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -134,42 +133,19 @@ def build_document_content(scraped_text: str) -> str:
 
 
 async def add_to_vector_store(content: str):
-    """Add the Render Workflows docs document, replacing any prior copy."""
-    await vector_store.initialize()
-
-    print("\nRemoving old Workflows docs documents...")
-    async with vector_store.pool.acquire() as conn:
-        result = await conn.execute("""
-            DELETE FROM documents
-            WHERE source = $1
-        """, DOCS_URL)
-        deleted_existing = int(result.split()[-1])
-        print(f"   Deleted {deleted_existing} existing documents")
-
-    print("\nAdding Render Workflows docs document to vector store...")
-
+    """Add the Render Workflows docs, section-chunked, replacing any prior copy."""
     if len(content) < 100:
         print("Error: Content too short, aborting")
-        await vector_store.close()
         return
 
-    embed_result = await embed_question(content)
-
-    await vector_store.insert_document(
+    print("\nAdding Render Workflows docs (section-aware) to vector store...")
+    await ingest_curated_markdown(
         content=content,
         source=DOCS_URL,
         title="Render Workflows Documentation",
-        embedding=embed_result["embedding"],
         section="AI Agent Deployment on Render",
-        metadata={
-            "type": "docs",
-            "category": "ai_agent",
-            "title": "Render Workflows Documentation"
-        }
+        metadata={"type": "docs", "category": "ai_agent"},
     )
-
-    await vector_store.close()
-    print("Successfully added 1 Render Workflows docs document!")
 
 
 async def main():

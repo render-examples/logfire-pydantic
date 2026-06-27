@@ -29,16 +29,19 @@ class Settings(BaseSettings):
     workflow_slug: str = ""  # e.g. "pydantic-agents-pipeline" (from the Workflow's Dashboard page)
     
     # Pipeline Configuration
-    quality_threshold: int = 85
-    accuracy_threshold: int = 70  # Based on empirical avg of 73 (was 80, too strict)
-    agreement_threshold: int = 10
-    max_iterations: int = 1  # First iteration is best; further iterations degrade quality
     max_tokens: int = 4000  # Answer generation budget; raised from 2000 so broad answers aren't truncated
     timeout_seconds: int = 30
     
     # RAG Configuration
-    rag_top_k: int = 20  # Increased to 20 for broader coverage of multi-product questions
-    similarity_threshold: float = 0.3  # Lowered from 0.5 for broader retrieval
+    rag_top_k: int = 20  # Hard ceiling / backstop on retrieved docs, NOT a fixed quota.
+    # Absolute floor: a doc is returned only if its cosine similarity >= this value,
+    # so the result count varies with the question. The relevance gate lives in
+    # hybrid_search; the adaptive cutoff below tightens it further per query.
+    similarity_threshold: float = 0.3
+    # Adaptive relative cutoff anchored to the best match: keep a doc only if its
+    # cosine >= max(similarity_threshold, top_score * relevance_cutoff_fraction).
+    # Strong topics filter aggressively; weaker-but-valid topics keep their cluster.
+    relevance_cutoff_fraction: float = 0.75
     verification_threshold: float = 0.30  # Similarity threshold for claim verification (lowered to catch explicit facts)
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
@@ -70,7 +73,6 @@ class PipelineConfig:
     STAGE_VERIFICATION = "claims_verification"
     STAGE_ACCURACY = "technical_accuracy"
     STAGE_EVALUATION = "quality_evaluation"
-    STAGE_QUALITY_GATE = "quality_gate"
 
 
 # Global settings instance
