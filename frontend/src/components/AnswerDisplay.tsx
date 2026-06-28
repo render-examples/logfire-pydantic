@@ -277,6 +277,11 @@ export default function AnswerDisplay({ answer }: AnswerDisplayProps) {
                 <div className="flex items-start justify-between gap-4 mb-2">
                   <h4 className="text-sm font-medium text-white">
                     {source.metadata.title || 'Document'}
+                    {source.metadata.matched_sections > 1 && (
+                      <span className="ml-2 text-xs text-zinc-400 font-normal">
+                        ({source.metadata.matched_sections} sections matched)
+                      </span>
+                    )}
                   </h4>
                   <span className="text-xs text-yellow-500 flex-shrink-0">
                     {(source.similarity_score * 100).toFixed(0)}% match
@@ -334,10 +339,9 @@ export default function AnswerDisplay({ answer }: AnswerDisplayProps) {
             {/* Pipeline Stages - Compact Format */}
             <div className="space-y-2">
               {answer.stages.map((stage, index) => {
-                // Format stage name - remove iteration suffix
+                // Format stage name for display (e.g. "rag_retrieval" -> "Rag Retrieval")
                 const stageName = stage.stage
                   .split('_')
-                  .filter(word => word !== 'iter' && !/^\d+$/.test(word))
                   .map(word => word.charAt(0).toUpperCase() + word.slice(1))
                   .join(' ')
                 
