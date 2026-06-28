@@ -4,18 +4,35 @@ This document provides a detailed breakdown of each stage in the Q&A pipeline, i
 
 ## Pipeline Overview
 
-The pipeline processes questions through seven stages in a single linear pass:
+The pipeline processes each question through seven stages in a single linear pass:
 
 ```
 [1] Embedding → [2] Retrieval → [3] Generation → [4] Claims → 
 [5] Verification → [6] Accuracy → [7] Evaluation
 ```
 
-The stage logic below lives in [`backend/pipeline/`](../backend/pipeline/) and is unchanged.
+Conceptually the post-generation stages group into **three distinct verification capabilities**,
+each answering a different question and demonstrating a different Workflows pattern:
+
+| Capability | Stages | Question it answers |
+|------------|--------|---------------------|
+| **Grounding** | [4] Claims Extraction → [5] Claims Verification | Is every factual statement supported by the retrieved sources? |
+| **Accuracy** | [6] Technical Accuracy | Are there factual/technical errors? (surfaces errors + corrections) |
+| **Quality** | [7] Dual-Model Evaluation | How well does the answer serve the developer, and do two independent judges agree? |
+
+These are deliberately *not* redundant: Grounding checks claims against sources, Accuracy owns
+factual correctness, and Quality owns the developer experience (clarity, completeness, usefulness).
+
+Answer generation ([3]) is **neutral**: the assistant answers only from the retrieved context with
+no product-favorable steering in the prompt. Render-specific docs reach the model through retrieval
+and the curated-injection rules in [`retrieval.py`](../backend/pipeline/retrieval.py), not by being
+hard-coded into the generation instructions.
+
+The stage logic below lives in [`backend/pipeline/`](../backend/pipeline/).
 In production it executes as a **Render Workflows** run: the `run_qa_pipeline` orchestrator
 ([`workflows/app.py`](../workflows/app.py)) keeps the cheap stages (1, 2) in-process and
 promotes the heavy LLM stages (3, 4, 5) to their own retried subtasks, with stages 6 + 7
-running as concurrent subtasks on separate instances. See the
+running as three concurrent subtasks on separate instances. See the
 [Architecture section of the README](../README.md#architecture) for the topology.
 
 ---
@@ -52,8 +69,6 @@ async def embed_question(text: str) -> List[float]:
 **Purpose:** Find relevant documentation chunks using hybrid search
 
 **Database:** PostgreSQL with pgvector extension + full-text search
-
-**Vector Index:** HNSW (`documents_embedding_hnsw_idx`, `USING hnsw (embedding vector_cosine_ops)`, default build params). At this corpus size HNSW delivers effectively exact recall with no probe/`lists` tuning required.
 
 **Method:** Hybrid Search combining semantic (vector) + lexical (BM25) search
 
@@ -104,7 +119,7 @@ For a technical deep-dive on hybrid search implementation, see [HYBRID_SEARCH.md
 
 ## Stage 3: Answer Generation
 
-**Purpose:** Generate comprehensive answer using retrieved context
+**Purpose:** Generate a comprehensive answer **neutrally** from the retrieved context — the prompt contains only grounding rules (use the context, don't invent, don't conflate product types), with no product-favorable steering
 
 **Model:** Claude Sonnet 4.6
 
@@ -133,6 +148,8 @@ async def generate_answer(question: str, context: str) -> dict:
 ---
 
 ## Stage 4: Claims Extraction
+
+**Capability:** Grounding (Stage 4 → Stage 5) — is every factual statement supported by the retrieved sources?
 
 **Purpose:** Extract verifiable factual claims from generated answer
 
@@ -171,7 +188,9 @@ async def generate_answer(question: str, context: str) -> dict:
 
 ## Stage 6: Technical Accuracy Check
 
-**Purpose:** Deep accuracy validation using Claude
+**Capability:** Accuracy — owns *factual correctness*
+
+**Purpose:** Deep factual-grounding validation using Claude. Judges only whether the answer is correct and grounded (not its style or completeness — that is Stage 7's job); surfaces errors + corrections for observability
 
 **Model:** Claude Sonnet 4.6
 
@@ -188,7 +207,9 @@ async def generate_answer(question: str, context: str) -> dict:
 
 ## Stage 7: Quality Rating (Dual-Model Evaluation)
 
-**Purpose:** Independent quality assessment from two models
+**Capability:** Quality — owns the *developer experience*
+
+**Purpose:** Independent quality assessment (clarity, completeness, usefulness) from two models running in parallel; factual verification is left to Stage 6, and the two judges' agreement is a confidence signal
 
 **Models:** OpenAI GPT-4o-mini + Anthropic Claude Sonnet 4.6
 
@@ -214,8 +235,6 @@ async def generate_answer(question: str, context: str) -> dict:
 - Average latency: ~300ms
 - Cost per evaluation: ~$0.007
 - Inter-rater agreement: 77% (within 10 points)
-
-The `quality_score` and `accuracy_score` produced here are stored on the session, but the pipeline is a single linear pass: the first generated answer is always the one returned. There is no quality gate or regeneration loop.
 
 ---
 
@@ -275,7 +294,7 @@ Other:                  7% of traffic
 ### Improving Quality
 
 1. **Improve RAG context** - Add more documentation, refine chunking
-2. **Tune prompts** - Refine generation and evaluation prompts
+2. **Tune prompts** - Iterate on generation and evaluation prompts
 3. **Increase MAX_TOKENS** - Allow more detailed answers for complex questions
 4. **Add examples** - Few-shot examples in prompts
 

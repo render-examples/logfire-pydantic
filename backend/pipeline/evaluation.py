@@ -1,29 +1,33 @@
-"""Stage 7: Quality Rating (Dual-Model Evaluation)."""
+"""Quality: developer-experience evaluation (dual-model).
 
-from typing import List
-import asyncio
-from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIModel as OpenAIChatModel
-from pydantic_ai.models.anthropic import AnthropicModel
-from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.providers.anthropic import AnthropicProvider
+The verification capability that owns *answer quality* — clarity, completeness, and
+actionability for the developer who asked. Two independent judges (OpenAI + Anthropic)
+score in parallel and their agreement is a confidence signal. Factual grounding is
+checked separately by the Accuracy stage, so this stage does not re-verify each fact."""
 
-from backend.config import settings, PipelineConfig
-from backend.models import Document, EvaluationResult, EvaluationOutput
-from backend.observability import instrument_stage, calculate_openai_cost, calculate_anthropic_cost
-import logfire
+from backend.config import settings
+from backend.models import EvaluationResult, EvaluationOutput
+from backend.observability import (
+    calculate_openai_cost,
+    calculate_anthropic_cost,
+    usage_and_cost,
+)
+from backend.pipeline._agents import anthropic_agent, openai_agent
 
 
 EVALUATION_INSTRUCTIONS = """You are a quality evaluator for technical documentation answers.
 
-Evaluate the answer on the following criteria and return a structured JSON assessment.
+Judge how well the answer SERVES THE DEVELOPER who asked the question — its clarity, structure,
+completeness of coverage, and actionability. Factual verification against the source documentation
+is handled by a separate accuracy stage, so focus on the quality and usefulness of the response
+rather than re-checking each fact. Return a structured JSON assessment.
 
 CRITICAL: If the answer essentially says "I don't know", "I can't answer", or "information not available",
 it should receive very low scores (0-20) across all criteria, regardless of how politely it's written.
 
 Scoring criteria:
-- technical_accuracy (0-100, weight 30%): Is the information correct and up-to-date?
-  Score 0-20 if answer says it lacks information.
+- technical_accuracy (0-100, weight 30%): Is the answer technically sound and internally consistent —
+  free of obviously contradictory or misleading statements? Score 0-20 if answer says it lacks information.
 - clarity (0-100, weight 25%): Is the answer well-structured and easy to understand?
   Score 0-20 if answer doesn't actually provide substantive information.
 - completeness (0-100, weight 25%): Does it fully address the question with specific details?
@@ -33,17 +37,22 @@ Scoring criteria:
 - overall (0-100): Weighted average of the above scores.
 - feedback: 1-2 sentences of constructive feedback."""
 
-_openai_eval_agent = Agent(
-    OpenAIChatModel(settings.eval_model_openai, provider=OpenAIProvider(api_key=settings.openai_api_key)),
-    output_type=EvaluationOutput,
-    instructions=EVALUATION_INSTRUCTIONS,
+_openai_eval_agent = openai_agent(
+    settings.eval_model_openai, EVALUATION_INSTRUCTIONS, output_type=EvaluationOutput
 )
 
-_anthropic_eval_agent = Agent(
-    AnthropicModel(settings.eval_model_anthropic, provider=AnthropicProvider(api_key=settings.anthropic_api_key)),
-    output_type=EvaluationOutput,
-    instructions=EVALUATION_INSTRUCTIONS,
+_anthropic_eval_agent = anthropic_agent(
+    settings.eval_model_anthropic, EVALUATION_INSTRUCTIONS, output_type=EvaluationOutput
 )
+
+
+def agreement_level(score_difference: float) -> str:
+    """Map the gap between the two judges' scores to a qualitative agreement label."""
+    if score_difference <= 5:
+        return "high"
+    if score_difference <= 15:
+        return "medium"
+    return "low"
 
 
 async def evaluate_with_openai(question: str, answer: str, doc_count: int) -> dict:
@@ -63,16 +72,13 @@ Evaluate the quality of this answer."""
         model_settings={"temperature": 0.1, "max_tokens": 500},
     )
 
-    usage = result.usage()
-    input_tokens = usage.request_tokens or 0
-    output_tokens = usage.response_tokens or 0
-    cost_usd = calculate_openai_cost(input_tokens, output_tokens, settings.eval_model_openai)
+    usage = usage_and_cost(result, calculate_openai_cost, settings.eval_model_openai)
 
     return {
         "output": result.output,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cost_usd": cost_usd,
+        "input_tokens": usage["input_tokens"],
+        "output_tokens": usage["output_tokens"],
+        "cost_usd": usage["cost_usd"],
         "model": settings.eval_model_openai,
     }
 
@@ -94,16 +100,13 @@ Evaluate the quality of this answer."""
         model_settings={"temperature": 0.1, "max_tokens": 500},
     )
 
-    usage = result.usage()
-    input_tokens = usage.request_tokens or 0
-    output_tokens = usage.response_tokens or 0
-    cost_usd = calculate_anthropic_cost(input_tokens, output_tokens, settings.eval_model_anthropic)
+    usage = usage_and_cost(result, calculate_anthropic_cost, settings.eval_model_anthropic)
 
     return {
         "output": result.output,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cost_usd": cost_usd,
+        "input_tokens": usage["input_tokens"],
+        "output_tokens": usage["output_tokens"],
+        "cost_usd": usage["cost_usd"],
         "model": settings.eval_model_anthropic,
     }
 
@@ -119,66 +122,3 @@ def build_evaluation_result(output: EvaluationOutput, model: str) -> EvaluationR
         developer_value=output.developer_value,
         feedback=output.feedback,
     )
-
-
-@instrument_stage(PipelineConfig.STAGE_EVALUATION)
-async def evaluate_quality(
-    question: str,
-    answer: str,
-    documents: List[Document]
-) -> dict:
-    """
-    Independent quality assessment from two models.
-
-    Args:
-        question: The user's question
-        answer: The generated answer
-        documents: Source documents
-
-    Returns:
-        dict with 'evaluations', 'average_score', 'agreement_level', 'total_cost_usd'
-    """
-
-    logfire.info("Evaluating quality with dual models")
-
-    doc_count = len(documents)
-
-    # Run both evaluations in parallel
-    openai_result, anthropic_result = await asyncio.gather(
-        evaluate_with_openai(question, answer, doc_count),
-        evaluate_with_anthropic(question, answer, doc_count),
-    )
-
-    openai_eval = build_evaluation_result(openai_result["output"], openai_result["model"])
-    anthropic_eval = build_evaluation_result(anthropic_result["output"], anthropic_result["model"])
-
-    evaluations = [openai_eval, anthropic_eval]
-
-    average_score = (openai_eval.score + anthropic_eval.score) / 2
-    score_difference = abs(openai_eval.score - anthropic_eval.score)
-
-    if score_difference <= 5:
-        agreement_level = "high"
-    elif score_difference <= 15:
-        agreement_level = "medium"
-    else:
-        agreement_level = "low"
-
-    total_cost = openai_result["cost_usd"] + anthropic_result["cost_usd"]
-
-    logfire.info(
-        "Quality evaluated",
-        openai_score=openai_eval.score,
-        anthropic_score=anthropic_eval.score,
-        average_score=average_score,
-        agreement_level=agreement_level,
-        score_difference=score_difference,
-        cost_usd=total_cost,
-    )
-
-    return {
-        "evaluations": evaluations,
-        "average_score": average_score,
-        "agreement_level": agreement_level,
-        "cost_usd": total_cost,
-    }

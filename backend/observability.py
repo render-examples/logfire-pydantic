@@ -33,78 +33,66 @@ P = ParamSpec('P')
 R = TypeVar('R')
 
 
+def _record_stage_success(span: LogfireSpan, start_time: float, result: Any) -> None:
+    """Record duration/success on the span, plus cost + token attrs when the stage
+    returned a dict carrying them."""
+    span.set_attribute("duration_ms", (time.time() - start_time) * 1000)
+    span.set_attribute("success", True)
+    if isinstance(result, dict):
+        if "cost_usd" in result:
+            span.set_attribute("cost_usd", result["cost_usd"])
+        if "input_tokens" in result:
+            span.set_attribute("input_tokens", result["input_tokens"])
+        if "output_tokens" in result:
+            span.set_attribute("output_tokens", result["output_tokens"])
+
+
+def _record_stage_failure(span: LogfireSpan, start_time: float, stage_name: str, exc: Exception) -> None:
+    """Record failure attributes on the span and log the error."""
+    span.set_attribute("duration_ms", (time.time() - start_time) * 1000)
+    span.set_attribute("success", False)
+    span.set_attribute("error", str(exc))
+    logfire.error(f"Stage {stage_name} failed: {exc}")
+
+
 def instrument_stage(stage_name: str):
-    """Decorator to instrument a pipeline stage with Logfire."""
-    
+    """Decorator to instrument a pipeline stage with Logfire.
+
+    Picks an async or sync wrapper based on the wrapped function; both share the
+    same span lifecycle via _record_stage_success / _record_stage_failure, so the
+    only difference between them is the await.
+    """
+    import inspect
+
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         @wraps(func)
         async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            with logfire.span(
-                stage_name
-            ) as span:
+            with logfire.span(stage_name) as span:
                 span.set_attribute("span_type", "pipeline_stage")
                 start_time = time.time()
-                
                 try:
                     result = await func(*args, **kwargs)
-                    
-                    duration_ms = (time.time() - start_time) * 1000
-                    span.set_attribute("duration_ms", duration_ms)
-                    span.set_attribute("success", True)
-                    
-                    # Add cost if available
-                    if isinstance(result, dict) and "cost_usd" in result:
-                        span.set_attribute("cost_usd", result["cost_usd"])
-                    
-                    # Add token usage if available
-                    if isinstance(result, dict):
-                        if "input_tokens" in result:
-                            span.set_attribute("input_tokens", result["input_tokens"])
-                        if "output_tokens" in result:
-                            span.set_attribute("output_tokens", result["output_tokens"])
-                    
+                    _record_stage_success(span, start_time, result)
                     return result
-                    
                 except Exception as e:
-                    duration_ms = (time.time() - start_time) * 1000
-                    span.set_attribute("duration_ms", duration_ms)
-                    span.set_attribute("success", False)
-                    span.set_attribute("error", str(e))
-                    logfire.error(f"Stage {stage_name} failed: {e}")
+                    _record_stage_failure(span, start_time, stage_name, e)
                     raise
-        
+
         @wraps(func)
         def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            with logfire.span(
-                stage_name
-            ) as span:
+            with logfire.span(stage_name) as span:
                 span.set_attribute("span_type", "pipeline_stage")
                 start_time = time.time()
-                
                 try:
                     result = func(*args, **kwargs)
-                    
-                    duration_ms = (time.time() - start_time) * 1000
-                    span.set_attribute("duration_ms", duration_ms)
-                    span.set_attribute("success", True)
-                    
+                    _record_stage_success(span, start_time, result)
                     return result
-                    
                 except Exception as e:
-                    duration_ms = (time.time() - start_time) * 1000
-                    span.set_attribute("duration_ms", duration_ms)
-                    span.set_attribute("success", False)
-                    span.set_attribute("error", str(e))
-                    logfire.error(f"Stage {stage_name} failed: {e}")
+                    _record_stage_failure(span, start_time, stage_name, e)
                     raise
-        
-        # Return appropriate wrapper based on function type
-        import inspect
-        if inspect.iscoroutinefunction(func):
-            return async_wrapper  # type: ignore
-        else:
-            return sync_wrapper  # type: ignore
-    
+
+        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper  # type: ignore
+
     return decorator
 
 
@@ -144,26 +132,40 @@ async def pipeline_trace(question: str):
 
 def calculate_embedding_cost(tokens: int) -> float:
     """Calculate cost for embedding API calls."""
-    from backend.prices import get_price
+    from backend.prices import model_cost
     from backend.config import settings
-    price = get_price(settings.embedding_model)
-    return (tokens / 1_000_000) * price.input_cost_per_m
+    return model_cost(tokens, 0, settings.embedding_model, "openai")
 
 
 def calculate_openai_cost(input_tokens: int, output_tokens: int, model: str) -> float:
     """Calculate cost for OpenAI API calls."""
-    from backend.prices import get_price
-    price = get_price(model)
-    return (input_tokens / 1_000_000) * price.input_cost_per_m + \
-           (output_tokens / 1_000_000) * price.output_cost_per_m
+    from backend.prices import model_cost
+    return model_cost(input_tokens, output_tokens, model, "openai")
 
 
 def calculate_anthropic_cost(input_tokens: int, output_tokens: int, model: str) -> float:
     """Calculate cost for Anthropic API calls."""
-    from backend.prices import get_price
-    price = get_price(model)
-    return (input_tokens / 1_000_000) * price.input_cost_per_m + \
-           (output_tokens / 1_000_000) * price.output_cost_per_m
+    from backend.prices import model_cost
+    return model_cost(input_tokens, output_tokens, model, "anthropic")
+
+
+def usage_and_cost(result, cost_fn, model: str) -> dict:
+    """Extract token usage from a pydantic-ai run result and compute its cost.
+
+    Centralizes the request/response-token extraction (with the ``or 0`` guard)
+    plus the cost calculation that every LLM pipeline stage repeats. ``cost_fn``
+    is one of ``calculate_openai_cost`` / ``calculate_anthropic_cost``.
+
+    Returns a dict with ``input_tokens``, ``output_tokens``, ``cost_usd``.
+    """
+    usage = result.usage()
+    input_tokens = usage.request_tokens or 0
+    output_tokens = usage.response_tokens or 0
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost_usd": cost_fn(input_tokens, output_tokens, model),
+    }
 
 
 def track_pipeline_metrics(

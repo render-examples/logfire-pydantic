@@ -1,12 +1,13 @@
-"""FastAPI gateway for Ask Render Anything Assistant.
+"""FastAPI app for Ask Render Anything Assistant.
 
-The Q&A pipeline runs in a separate Render Workflows service. This gateway is a
-thin client: ``POST /ask`` triggers a workflow run and ``GET /ask/{run_id}``
-polls it for the result. It also serves health, stats, and session history.
+The Q&A pipeline runs in-process: ``POST /ask`` launches it as a background task
+and returns a ``run_id`` immediately; ``GET /ask/{run_id}`` polls the recorded
+status for the result. It also serves health, stats, and session history.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
-from functools import lru_cache
+from uuid import uuid4
 
 # Export .env into os.environ before importing the Render SDK. The SDK reads
 # RENDER_USE_LOCAL_DEV (and other SDK-only vars) via os.getenv(), but pydantic-settings
@@ -24,20 +25,17 @@ import logfire
 # Importing observability configures Logfire + instrumentation at module load.
 import backend.observability  # noqa: F401
 
-from render_sdk import RenderAsync
-from render_sdk.client.errors import RenderError
-from render_sdk.client.types import TaskRunStatusValues
-
 from backend.config import settings
 from backend.models import QuestionRequest, HealthCheck
 from backend.database import vector_store
+from backend.pipeline.orchestrator import run_qa_pipeline
 from backend.api.logs import fetch_logfire_logs
 
 
-@lru_cache(maxsize=1)
-def get_render() -> RenderAsync:
-    """Lazily build a single async Render client for triggering/polling runs."""
-    return RenderAsync(token=settings.render_api_key or None)
+# Strong references to in-flight pipeline tasks, so the event loop doesn't
+# garbage-collect a background task before it finishes. Each task removes itself
+# on completion via the done-callback registered in ``ask_question``.
+_background_tasks: set[asyncio.Task] = set()
 
 
 @asynccontextmanager
@@ -101,69 +99,110 @@ async def health_check():
     )
 
 
+async def _execute_pipeline(
+    run_id: str,
+    question: str,
+    session_id: str | None,
+    client_id: str | None,
+    progress_token: str,
+) -> None:
+    """Run the pipeline to completion and record its terminal status.
+
+    Runs as a detached background task launched from ``POST /ask`` so the request
+    can return immediately. Any failure is captured in ``pipeline_runs`` (status
+    ``failed``) rather than raised, so the poll endpoint can surface it.
+    """
+    try:
+        result = await run_qa_pipeline(
+            question=question,
+            session_id=session_id,
+            client_id=client_id,
+            progress_token=progress_token,
+        )
+        await vector_store.set_run_status(run_id, "done", result=result)
+    except Exception as e:  # noqa: BLE001 - report failure via the run record
+        logfire.error("Q&A pipeline run failed", run_id=run_id, error=str(e), exc_info=True)
+        try:
+            await vector_store.set_run_status(run_id, "failed", error=str(e))
+        except Exception as inner:  # noqa: BLE001
+            logfire.error(f"Failed to record run failure: {inner}")
+
+
 @app.post("/ask", status_code=202, tags=["Q&A"])
 async def ask_question(request: QuestionRequest):
     """
-    Trigger the Q&A pipeline workflow for a question.
+    Start the Q&A pipeline for a question.
 
-    The pipeline runs asynchronously in the Render Workflows service. This
-    returns a ``run_id`` immediately; poll ``GET /ask/{run_id}`` for the result.
+    The pipeline runs in-process as a background task. This returns a ``run_id``
+    immediately; poll ``GET /ask/{run_id}`` for the result.
     """
-
-    if not settings.workflow_slug:
-        raise HTTPException(status_code=503, detail="WORKFLOW_SLUG is not configured")
 
     with logfire.span(
         "user_session.qa_request",
         session_id=request.session_id or "anonymous",
+        client_id=request.client_id or "anonymous",
         question=request.question[:100],
         question_length=len(request.question),
     ):
-        try:
-            render = get_render()
-            task_run = await render.workflows.start_task(
-                f"{settings.workflow_slug}/run_qa_pipeline",
-                {"question": request.question, "session_id": request.session_id},
-            )
-            logfire.info(
-                "Triggered Q&A workflow run",
-                run_id=task_run.id,
-                session_id=request.session_id or "anonymous",
-            )
-            return {"run_id": task_run.id, "status": "pending"}
+        run_id = str(uuid4())
+        # Opaque token the pipeline writes live per-stage progress under, so the
+        # poll endpoint can surface real stage-by-stage feedback to the UI.
+        progress_token = str(uuid4())
 
-        except RenderError as e:
-            logfire.error("Failed to trigger workflow run", error=str(e), exc_info=True)
-            raise HTTPException(status_code=502, detail=f"Failed to start pipeline: {e}")
+        await vector_store.set_run_status(run_id, "running")
+
+        task = asyncio.create_task(
+            _execute_pipeline(
+                run_id,
+                request.question,
+                request.session_id,
+                request.client_id,
+                progress_token,
+            )
+        )
+        # Hold a strong reference until the task finishes (see _background_tasks).
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+        logfire.info(
+            "Started in-process Q&A run",
+            run_id=run_id,
+            session_id=request.session_id or "anonymous",
+        )
+        return {"run_id": run_id, "progress_token": progress_token, "status": "pending"}
 
 
 @app.get("/ask/{run_id}", tags=["Q&A"])
-async def get_answer(run_id: str):
+async def get_answer(run_id: str, progress_token: str | None = None):
     """
-    Poll a Q&A workflow run.
+    Poll a Q&A pipeline run.
 
     Returns ``{"status": "running"}`` while in progress, ``{"status": "done",
     "result": <AnswerResponse>}`` on success, or ``{"status": "failed",
-    "error": ...}`` if the run failed.
+    "error": ...}`` if the run failed. When ``progress_token`` is supplied, the
+    cumulative per-stage progress recorded so far is returned as ``updates`` so
+    the UI can show real stage-by-stage feedback while the run is in flight.
     """
 
-    try:
-        details = await get_render().workflows.get_task_run(run_id)
-    except RenderError as e:
-        raise HTTPException(status_code=404, detail=f"Run not found: {e}")
+    # Live per-stage progress (best-effort — never fail the poll over it).
+    updates: list[dict] = []
+    if progress_token:
+        try:
+            updates = await vector_store.get_progress(progress_token)
+        except Exception as e:  # noqa: BLE001
+            logfire.warning(f"Failed to read progress: {e}")
 
-    status = details.status.value if hasattr(details.status, "value") else details.status
+    run = await vector_store.get_run_status(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
 
-    if status in (TaskRunStatusValues.SUCCEEDED, TaskRunStatusValues.COMPLETED):
-        # The orchestrator returns a single AnswerResponse dict; results is a list.
-        result = details.results[0] if details.results else None
-        return {"status": "done", "result": result}
+    if run["status"] == "done":
+        return {"status": "done", "result": run["result"], "updates": updates}
 
-    if status in (TaskRunStatusValues.FAILED, TaskRunStatusValues.CANCELED):
-        error = getattr(details, "error", None) or f"Run {status}"
-        return {"status": "failed", "error": str(error)}
+    if run["status"] == "failed":
+        return {"status": "failed", "error": run["error"] or "Run failed", "updates": updates}
 
-    return {"status": "running"}
+    return {"status": "running", "updates": updates}
 
 
 @app.get("/stats", tags=["Admin"])
@@ -176,25 +215,27 @@ async def get_stats():
         "document_count": doc_count,
         "embedding_model": settings.embedding_model,
         "embedding_dimensions": settings.embedding_dimensions,
-        "rag_top_k": settings.rag_top_k,
-        "similarity_threshold": settings.similarity_threshold,
-        "relevance_cutoff_fraction": settings.relevance_cutoff_fraction,
+        "rag_top_k": settings.rag_top_k
     }
 
 
 @app.get("/history", tags=["Q&A"])
-async def get_history(limit: int = 20):
+async def get_history(client_id: str, limit: int = 20):
     """
-    Get recent Q&A sessions.
+    Get recent Q&A sessions for the calling browser client.
 
     Args:
+        client_id: Anonymous browser client ID to scope history to.
         limit: Maximum number of sessions to return (default: 20, max: 100)
     """
+
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id is required")
 
     if limit > 100:
         raise HTTPException(status_code=400, detail="Limit cannot exceed 100")
 
-    sessions = await vector_store.get_recent_sessions(limit=limit)
+    sessions = await vector_store.get_recent_sessions(client_id=client_id, limit=limit)
 
     return {
         "sessions": sessions,
@@ -220,15 +261,19 @@ async def get_session(session_id: str):
 
 
 @app.delete("/history/{session_id}", tags=["Q&A"])
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, client_id: str):
     """
-    Delete a specific Q&A session by ID.
+    Delete a specific Q&A session by ID, scoped to the calling client.
 
     Args:
         session_id: The UUID of the session to delete
+        client_id: Anonymous browser client ID that must own the session
     """
 
-    deleted = await vector_store.delete_session(session_id)
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id is required")
+
+    deleted = await vector_store.delete_session(session_id, client_id)
 
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -241,14 +286,20 @@ async def delete_session(session_id: str):
 
 
 @app.delete("/history", tags=["Q&A"])
-async def clear_all_history():
+async def clear_all_history(client_id: str):
     """
-    Delete all Q&A sessions from history.
+    Delete all Q&A sessions owned by the calling client.
 
     This action cannot be undone.
+
+    Args:
+        client_id: Anonymous browser client ID whose history is cleared
     """
 
-    deleted_count = await vector_store.delete_all_sessions()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id is required")
+
+    deleted_count = await vector_store.delete_all_sessions(client_id)
 
     return {
         "success": True,

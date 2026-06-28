@@ -3,7 +3,8 @@
 import asyncio
 import json
 import re
-from typing import Callable, List
+from dataclasses import dataclass
+from typing import List, Optional
 
 from backend.config import settings, PipelineConfig
 from backend.database import vector_store
@@ -12,6 +13,16 @@ from backend.observability import instrument_stage
 from backend.pipeline.embeddings import embed_question
 from backend.pipeline.query_expansion import expand_query, should_expand_query
 import logfire
+
+
+# Score for an editorially-injected curated doc: the top of the cosine scale, so it
+# ranks first. It is NOT a measured similarity — it marks a doc we deliberately surface
+# for a topic. A curated doc is only injected when retrieval did NOT already find it
+# (see inject_curated_docs), so this never disguises a real search result.
+INJECTED_DOC_SCORE = 1.0
+
+# All pricing tables live under this source and are distinguished by title.
+PRICING_SOURCE = "https://render.com/pricing"
 
 
 # Pricing keywords that trigger explicit pricing table injection
@@ -37,8 +48,6 @@ PRODUCT_KEYWORDS = {
     'cron job': ['Render Cron Jobs Pricing'],
 }
 
-PRICING_SOURCE = "https://render.com/pricing"
-
 # AI/agent keywords that trigger the Render Workflows agents tutorial injection
 AI_AGENT_KEYWORDS = [
     'ai agent', 'ai agents', 'llm agent', 'llm', 'language model',
@@ -51,9 +60,8 @@ AI_AGENT_KEYWORDS = [
 # 'ai' is matched with word boundaries so it triggers on "ai" but not "email"/"detail".
 AI_AGENT_SINGLE_WORD_KEYWORDS = ['agent', 'agents', 'ai']
 
-# For "how do I deploy/run an AI agent on Render?" — and any question mentioning
-# "ai" or "agents" — we inject two authoritative sources, both at top priority:
-#   1. the Workflows agents tutorial (brings home the canonical answer), and
+# Two authoritative AI/agent sources are injected together:
+#   1. the Workflows agents tutorial, and
 #   2. the official Workflows docs (gives the verification + accuracy stages
 #      authoritative material to check the generated answer against).
 AI_AGENT_WORKFLOWS_SOURCE = "https://render.com/tutorials/agents-on-render-workflows/what-youll-build"
@@ -82,71 +90,134 @@ NODEJS_DOC_SOURCE = "https://render.com/docs/deploy-node-express-app"
 TUTORIALS_KEYWORDS = ['tutorial', 'tutorials']
 TUTORIALS_INDEX_SOURCE = "https://render.com/tutorials"
 
-# Curated docs are injected at the very top of the cosine scale. 1.0 is unreachable
-# by a real search hit, so it cleanly marks a doc the curation layer added — and
-# keeps it above retrieved docs without any score-boosting math.
-INJECTED_DOC_SCORE = 1.0
+
+# ---------------------------------------------------------------------------
+# Curated document injection — data-driven
+#
+# Certain topics have an authoritative doc we always want in context, even if
+# semantic search ranks it low. Rather than a detect_*/inject_* function pair per
+# topic (all duplicating the same fetch → parse-metadata → prepend boilerplate),
+# the topics are declared as data in INJECTION_RULES and a single helper
+# (inject_curated_docs) does the work. Add a topic by adding a row, not a function.
+# ---------------------------------------------------------------------------
 
 
-def detect_ai_agent_query(question: str) -> bool:
-    """Detect if the question is asking about AI agents or long-running agent processes."""
-    question_lower = question.lower()
+@dataclass(frozen=True)
+class DocLookup:
+    """Identifies one curated doc to fetch — by source URL, or by title within the
+    pricing page (all pricing tables share PRICING_SOURCE and differ only by title)."""
+    source: Optional[str] = None
+    title: Optional[str] = None
 
-    # Check multi-word and phrase keywords first
-    if any(keyword in question_lower for keyword in AI_AGENT_KEYWORDS):
+
+@dataclass(frozen=True)
+class InjectionRule:
+    """A keyword trigger → curated docs to prepend when the question matches."""
+    name: str
+    keywords: tuple = ()           # phrase/substring keywords
+    word_keywords: tuple = ()      # single words, matched with \b word boundaries
+    lookups: tuple = ()            # DocLookup entries to fetch when matched
+
+
+INJECTION_RULES = (
+    InjectionRule(
+        name="ai_agent",
+        keywords=tuple(AI_AGENT_KEYWORDS),
+        word_keywords=tuple(AI_AGENT_SINGLE_WORD_KEYWORDS),
+        # Tutorial first (leads the context), docs second (verification material).
+        lookups=(
+            DocLookup(source=AI_AGENT_WORKFLOWS_SOURCE),
+            DocLookup(source=AI_AGENT_WORKFLOWS_DOCS_SOURCE),
+        ),
+    ),
+    InjectionRule(
+        name="autoscaling",
+        keywords=tuple(AUTOSCALING_KEYWORDS),
+        word_keywords=tuple(AUTOSCALING_SINGLE_WORD_KEYWORDS),
+        lookups=(DocLookup(source=AUTOSCALING_DOC_SOURCE),),
+    ),
+    InjectionRule(
+        name="nodejs",
+        keywords=tuple(NODEJS_KEYWORDS),
+        word_keywords=tuple(NODEJS_SINGLE_WORD_KEYWORDS),
+        lookups=(DocLookup(source=NODEJS_DOC_SOURCE),),
+    ),
+    InjectionRule(
+        name="tutorials",
+        # "tutorial"/"tutorials" matched with word boundaries (as the old code did).
+        word_keywords=tuple(TUTORIALS_KEYWORDS),
+        lookups=(DocLookup(source=TUTORIALS_INDEX_SOURCE),),
+    ),
+)
+
+
+def _matches(question_lower: str, keywords: tuple, word_keywords: tuple) -> bool:
+    """True if the question contains any phrase keyword or any word-boundary keyword."""
+    if any(keyword in question_lower for keyword in keywords):
         return True
-
-    # Check single-word keywords with word boundaries to avoid false positives
-    # (e.g. "agent" should match but "email" should not match "ai")
-    for keyword in AI_AGENT_SINGLE_WORD_KEYWORDS:
-        if re.search(r'\b' + re.escape(keyword) + r'\b', question_lower):
-            return True
-
-    return False
-
-
-def detect_autoscaling_query(question: str) -> bool:
-    """Detect if the question is asking about autoscaling or scaling configuration."""
-    question_lower = question.lower()
-
-    if any(keyword in question_lower for keyword in AUTOSCALING_KEYWORDS):
-        return True
-
-    for keyword in AUTOSCALING_SINGLE_WORD_KEYWORDS:
-        if re.search(r'\b' + re.escape(keyword) + r'\b', question_lower):
-            return True
-
-    return False
-
-
-def detect_nodejs_query(question: str) -> bool:
-    """Detect if the question is asking about deploying Node.js or JavaScript apps."""
-    question_lower = question.lower()
-
-    if any(keyword in question_lower for keyword in NODEJS_KEYWORDS):
-        return True
-
-    for keyword in NODEJS_SINGLE_WORD_KEYWORDS:
-        if re.search(r'\b' + re.escape(keyword) + r'\b', question_lower):
-            return True
-
-    return False
-
-
-def detect_tutorials_query(question: str) -> bool:
-    """Detect if the question mentions tutorials."""
-    question_lower = question.lower()
     return any(
-        re.search(r'\b' + re.escape(keyword) + r'\b', question_lower)
-        for keyword in TUTORIALS_KEYWORDS
+        re.search(r'\b' + re.escape(word) + r'\b', question_lower)
+        for word in word_keywords
     )
+
+
+def _parse_metadata(raw) -> dict:
+    """JSONB metadata may come back as a string, None, or dict — normalize to dict."""
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw or {}
+
+
+async def _fetch_curated_docs(conn, lookup: DocLookup) -> List[Document]:
+    """Fetch the curated doc(s) for a lookup — by (pricing-page) title or by source.
+
+    Source-based lookups return ALL rows for the source: curated pages are now
+    chunked into multiple rows, and every chunk should be injected so generation
+    sees the whole page rather than one arbitrary chunk. Title-based (pricing)
+    lookups still resolve to their single table doc.
+    """
+    if lookup.title is not None:
+        rows = await conn.fetch(
+            """
+            SELECT content, source, title, section, metadata
+            FROM documents
+            WHERE title = $1 AND source = $2
+            """,
+            lookup.title, PRICING_SOURCE,
+        )
+    else:
+        rows = await conn.fetch(
+            """
+            SELECT content, source, title, section, metadata
+            FROM documents
+            WHERE source = $1
+            """,
+            lookup.source,
+        )
+
+    docs: List[Document] = []
+    for row in rows:
+        metadata = _parse_metadata(row['metadata'])
+        docs.append(Document(
+            content=row['content'],
+            source=row['source'],
+            metadata={
+                'title': row['title'],
+                'section': row['section'] or row['title'],
+                **metadata,
+            },
+            similarity_score=INJECTED_DOC_SCORE,
+        ))
+    return docs
 
 
 def detect_pricing_query(question: str) -> List[str]:
     """
     Detect if question is asking about pricing/plans and which products.
 
-    Returns list of pricing table titles to explicitly inject.
+    Returns list of pricing table titles to explicitly inject. Kept as its own
+    function (rather than a flat rule) because pricing needs a product → table map
+    plus smart defaults that a single keyword list can't express.
     """
     question_lower = question.lower()
 
@@ -186,187 +257,113 @@ def detect_pricing_query(question: str) -> List[str]:
     return list(tables_to_inject)
 
 
-# ---------------------------------------------------------------------------
-# Data-driven curated-doc injection
-# ---------------------------------------------------------------------------
-#
-# Each curated rule resolves a question to zero or more "fetch specs" — the
-# canonical docs that should be present for that topic. A spec is matched either
-# by exact source URL or by (title, source) for the pricing tables (which share a
-# source but differ by title). One generic injector then fetches, gates, and
-# applies a replace-weakest policy, so adding a topic is a single list entry
-# rather than another ~50-line copy-pasted function.
+def _apply_relative_cutoff(documents: List[Document]) -> List[Document]:
+    """Keep only docs competitive with the best retrieved match.
 
+    A fixed absolute threshold can't tell a strong topic (best cosine ~0.65) from a
+    weak one (best ~0.45) — at a low floor it lets a long tail of marginally-relevant
+    docs through on broad questions. Anchoring the cutoff to the top match self-tunes:
+    strong topics gate high and shed their tail, weak-but-valid topics keep their cluster.
 
-def _source_spec(url: str, hint: str) -> dict:
-    return {"by": "source", "value": url, "hint": hint}
-
-
-def _title_spec(title: str, hint: str) -> dict:
-    return {"by": "title", "value": (title, PRICING_SOURCE), "hint": hint}
-
-
-# A rule is (name, resolve) where resolve(question) -> list[spec].
-CURATED_RULES: List[tuple[str, Callable[[str], List[dict]]]] = [
-    (
-        "pricing",
-        lambda q: [
-            _title_spec(title, "data/scripts/add_pricing_page.py")
-            for title in detect_pricing_query(q)
-        ],
-    ),
-    (
-        "ai_agent",
-        lambda q: (
-            [
-                _source_spec(AI_AGENT_WORKFLOWS_SOURCE, "data/scripts/add_workflows_tutorial_page.py"),
-                _source_spec(AI_AGENT_WORKFLOWS_DOCS_SOURCE, "data/scripts/add_workflows_docs_page.py"),
-            ]
-            if detect_ai_agent_query(q)
-            else []
-        ),
-    ),
-    (
-        "autoscaling",
-        lambda q: (
-            [_source_spec(AUTOSCALING_DOC_SOURCE, "data/scripts/add_autoscaling_page.py")]
-            if detect_autoscaling_query(q)
-            else []
-        ),
-    ),
-    (
-        "nodejs",
-        lambda q: (
-            [_source_spec(NODEJS_DOC_SOURCE, "data/scripts/add_nodejs_page.py")]
-            if detect_nodejs_query(q)
-            else []
-        ),
-    ),
-    (
-        "tutorials",
-        lambda q: (
-            [_source_spec(TUTORIALS_INDEX_SOURCE, "data/scripts/add_tutorials_index_page.py")]
-            if detect_tutorials_query(q)
-            else []
-        ),
-    ),
-]
-
-
-def _resolve_curated_specs(question: str) -> List[dict]:
-    """Collect curated fetch specs from every matching rule, de-duplicated."""
-    specs: List[dict] = []
-    seen = set()
-    for name, resolve in CURATED_RULES:
-        for spec in resolve(question):
-            key = (spec["by"], spec["value"])
-            if key not in seen:
-                seen.add(key)
-                spec["rule"] = name
-                specs.append(spec)
-    return specs
-
-
-def _row_to_curated_doc(row) -> Document:
-    metadata = row["metadata"]
-    if isinstance(metadata, str):
-        metadata = json.loads(metadata)
-    elif metadata is None:
-        metadata = {}
-
-    return Document(
-        content=row["content"],
-        source=row["source"],
-        metadata={
-            "title": row["title"],
-            "section": row["section"] or row["title"],
-            **metadata,
-        },
-        similarity_score=INJECTED_DOC_SCORE,
-    )
-
-
-async def _fetch_curated_docs(conn, spec: dict) -> List[Document]:
-    """Fetch curated docs for a spec.
-
-    A by-source spec returns *all* chunks for that page — curated docs are now
-    section-chunked (one embedding per heading), so the whole canonical page is
-    injected rather than a single arbitrary section. A by-title spec (pricing
-    tables) returns the one matching table.
+    Anchors on the highest cosine in the set (not documents[0] — hybrid_search orders by
+    RRF, so position 0 isn't guaranteed to be the top cosine) and drops anything below
+    relevance_cutoff_fraction * top, with similarity_threshold as a hard floor. Returns
+    survivors sorted by cosine desc so the weakest sit at the tail (lets the injection
+    cap drop true-lowest-cosine docs).
     """
-    if spec["by"] == "source":
-        rows = await conn.fetch(
-            """
-            SELECT content, source, title, section, metadata
-            FROM documents
-            WHERE source = $1
-            ORDER BY id
-            """,
-            spec["value"],
-        )
-    else:  # by title
-        title, source = spec["value"]
-        rows = await conn.fetch(
-            """
-            SELECT content, source, title, section, metadata
-            FROM documents
-            WHERE title = $1 AND source = $2
-            LIMIT 1
-            """,
-            title,
-            source,
-        )
+    if not documents:
+        return documents
 
-    return [_row_to_curated_doc(row) for row in rows]
+    top = max(doc.similarity_score for doc in documents)
+    cutoff = max(settings.similarity_threshold, top * settings.relevance_cutoff_fraction)
+    kept = sorted(
+        (doc for doc in documents if doc.similarity_score >= cutoff),
+        key=lambda doc: doc.similarity_score,
+        reverse=True,
+    )
+    logfire.info(
+        "Applied adaptive relevance cutoff",
+        top=top,
+        cutoff=cutoff,
+        before=len(documents),
+        after=len(kept),
+    )
+    return kept
 
 
 async def inject_curated_docs(question: str, existing_docs: List[Document]) -> List[Document]:
     """
-    Ensure the canonical doc for each matched topic is present — without padding
-    the count.
+    Ensure the canonical doc for a matched topic is present — without padding the count.
 
-    Policy (relevance-gated, replace-weakest, never grow past rag_top_k):
-      - If a topic's curated doc was already retrieved, leave it (don't duplicate).
-      - Otherwise insert it at the top; if that pushes the set over the rag_top_k
-        ceiling, drop the weakest retrieved docs from the tail.
+    Data-driven replacement for the old per-topic detect_*/inject_* pairs: every rule
+    (plus pricing's product logic) funnels through one fetch → parse → build path.
+
+    Policy (replace-weakest, never grow past rag_top_k):
+      - If a topic's curated doc was already retrieved, leave it — retrieval found it.
+      - Otherwise insert it at the top (INJECTED_DOC_SCORE); if that pushes the set over
+        the rag_top_k ceiling, drop the lowest-ranked retrieved doc from the tail.
+    So curated docs are guaranteed-present and top-ranked, but the result count still
+    reflects retrieval's relevance gate rather than always sitting at the cap + 1.
     """
-    specs = _resolve_curated_specs(question)
-    if not specs:
+    question_lower = question.lower()
+
+    # Collect the lookups every matching rule wants, in declaration order.
+    lookups: List[DocLookup] = []
+    for rule in INJECTION_RULES:
+        if _matches(question_lower, rule.keywords, rule.word_keywords):
+            logfire.info(f"Curated-doc rule matched: {rule.name}")
+            lookups.extend(rule.lookups)
+
+    # Pricing keeps its own product → table logic but shares this fetch path.
+    for title in detect_pricing_query(question):
+        lookups.append(DocLookup(title=title))
+
+    if not lookups:
         return existing_docs
 
-    existing_sources = {doc.source for doc in existing_docs}
-    existing_titles = {(doc.metadata or {}).get("title") for doc in existing_docs}
+    # De-dup lookups (e.g. pricing defaults could request the same table twice),
+    # preserving order.
+    seen_keys = set()
+    unique_lookups: List[DocLookup] = []
+    for lookup in lookups:
+        key = (lookup.source, lookup.title)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            unique_lookups.append(lookup)
+
+    # Don't re-inject content already in the retrieved set. Chunks of one curated
+    # page share a title, so dedup on (source, content) rather than (source, title).
+    existing_keys = {(doc.source, doc.content) for doc in existing_docs}
 
     injected: List[Document] = []
+    seen_keys: set = set()
     async with vector_store.pool.acquire() as conn:
-        for spec in specs:
-            # Skip curated docs that semantic/BM25 search already surfaced.
-            if spec["by"] == "source" and spec["value"] in existing_sources:
-                continue
-            if spec["by"] == "title" and spec["value"][0] in existing_titles:
-                continue
-
-            docs = await _fetch_curated_docs(conn, spec)
+        for lookup in unique_lookups:
+            docs = await _fetch_curated_docs(conn, lookup)
             if not docs:
                 logfire.warning(
-                    "Curated doc not found in DB",
-                    rule=spec.get("rule"),
-                    target=str(spec["value"]),
-                    hint=f"run {spec['hint']}",
+                    "Curated doc not found in DB — run the matching ingest_source task",
+                    source=lookup.source,
+                    title=lookup.title,
                 )
                 continue
-            injected.extend(docs)
+            for doc in docs:
+                key = (doc.source, doc.content)
+                if key in existing_keys or key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                injected.append(doc)
 
     if not injected:
         return existing_docs
 
-    # Replace-weakest: curated docs lead the context; truncating from the tail
-    # drops the lowest-ranked retrieved docs so the set never grows past the cap.
+    # Insert curated docs at the top; cap at the rag_top_k ceiling, dropping the
+    # lowest-ranked retrieved docs from the tail (existing_docs is already in rank
+    # order, so the tail is the weakest).
     combined = injected + existing_docs
     dropped = max(0, len(combined) - settings.rag_top_k)
     if dropped:
-        combined = combined[: settings.rag_top_k]
-
+        combined = combined[:settings.rag_top_k]
     logfire.info(
         "Injected curated docs (replace-weakest)",
         injected=len(injected),
@@ -376,67 +373,43 @@ async def inject_curated_docs(question: str, existing_docs: List[Document]) -> L
     return combined
 
 
-def _apply_relative_cutoff(documents: List[Document]) -> List[Document]:
-    """
-    Adaptive relevance gate anchored to the best match.
-
-    Keep only docs whose cosine >= max(similarity_threshold, top * fraction), so
-    strong topics filter aggressively while weaker-but-valid topics keep their
-    cluster. Applied BEFORE curated injection so the injected 1.0 scores don't
-    skew the anchor.
-    """
-    if not documents:
-        return documents
-
-    top = max(doc.similarity_score for doc in documents)
-    cutoff = max(settings.similarity_threshold, top * settings.relevance_cutoff_fraction)
-    survivors = [doc for doc in documents if doc.similarity_score >= cutoff]
-    survivors.sort(key=lambda doc: doc.similarity_score, reverse=True)
-
-    logfire.info(
-        "Applied relative relevance cutoff",
-        top_score=top,
-        cutoff=cutoff,
-        kept=len(survivors),
-        dropped=len(documents) - len(survivors),
-    )
-    return survivors
-
-
 def collapse_sources(documents: List[Document]) -> List[Document]:
-    """
-    Collapse retrieved chunks into one entry per (source, title) for display.
+    """Collapse retrieved chunks into one source entry per document for display.
 
-    Keeps the highest-scoring chunk as the representative and records how many
-    sections matched in metadata['matched_sections']. The full chunk list still
-    feeds answer generation; only the UI-facing "Sources" view is collapsed, so
-    the same page no longer appears five times. Pricing tables share a source but
-    differ by title, so grouping on the (source, title) pair keeps them separate.
+    Retrieval and curated injection return *chunks*, and one page is chunked into
+    many rows sharing the same (source, title) — so a flat chunk list shows the same
+    document several times in the UI. This groups chunks by (source, title), keeps the
+    highest-scoring chunk as the representative (its content + similarity_score), and
+    records how many chunks matched in metadata['matching_sections']. The full chunk
+    list still feeds generation/verification; only the user-facing sources view is
+    collapsed.
+
+    Pricing tables intentionally stay separate: they share PRICING_SOURCE but differ
+    by title, so the (source, title) key keeps them as distinct cards.
     """
-    representatives: dict = {}
-    counts: dict = {}
+    groups: dict = {}
     order: List[tuple] = []
-
     for doc in documents:
         title = (doc.metadata or {}).get("title")
         key = (doc.source, title)
-        if key not in representatives:
-            representatives[key] = doc
-            counts[key] = 1
+        if key not in groups:
+            groups[key] = {"best": doc, "count": 1}
             order.append(key)
         else:
-            counts[key] += 1
-            if doc.similarity_score > representatives[key].similarity_score:
-                representatives[key] = doc
+            group = groups[key]
+            group["count"] += 1
+            if doc.similarity_score > group["best"].similarity_score:
+                group["best"] = doc
 
     collapsed: List[Document] = []
     for key in order:
-        rep = representatives[key]
-        collapsed.append(
-            rep.model_copy(
-                update={"metadata": {**(rep.metadata or {}), "matched_sections": counts[key]}}
-            )
-        )
+        group = groups[key]
+        best = group["best"]
+        merged = best.model_copy(deep=True)
+        merged.metadata = {**(best.metadata or {}), "matching_sections": group["count"]}
+        collapsed.append(merged)
+
+    collapsed.sort(key=lambda doc: doc.similarity_score, reverse=True)
     return collapsed
 
 
@@ -446,8 +419,7 @@ async def retrieve_documents(embedding: List[float], original_question: str = No
     Find relevant documentation chunks via vector similarity.
 
     Uses multi-query retrieval for broad questions to ensure diverse coverage
-    across multiple products/aspects, then applies an adaptive relevance cutoff
-    and relevance-gated curated-doc injection.
+    across multiple products/aspects.
 
     Args:
         embedding: Query embedding vector (used for fallback)
@@ -458,6 +430,7 @@ async def retrieve_documents(embedding: List[float], original_question: str = No
     """
 
     total_cost = 0.0001  # Base database query cost
+    queries_count = 1  # Number of query variations actually searched (1 unless expanded)
 
     # Check if we should use multi-query retrieval
     if original_question and await should_expand_query(original_question):
@@ -470,6 +443,7 @@ async def retrieve_documents(embedding: List[float], original_question: str = No
         # Expand query
         query_variations, expansion_cost = await expand_query(original_question)
         total_cost += expansion_cost
+        queries_count = len(query_variations)
 
         logfire.info(
             "Expanded query to multiple variations",
@@ -483,7 +457,7 @@ async def retrieve_documents(embedding: List[float], original_question: str = No
         original_hashes = set()  # content hashes that matched the original question
 
         # Calculate how many docs to retrieve per query
-        # Target: ~30-40 total docs before dedup, then take top k
+        # Target: ~30-40 total docs before dedup, then take top 20
         docs_per_query = max(10, settings.rag_top_k // len(query_variations) + 5)
 
         async def _embed_and_search(i: int, query: str):
@@ -505,21 +479,21 @@ async def retrieve_documents(embedding: List[float], original_question: str = No
             logfire.debug(f"Retrieved {len(docs)} docs for query {i+1}/{len(query_variations)}")
             total_cost += cost
 
+            # Deduplicate across variations: keep the highest cosine similarity seen
+            # for each piece of content. (query_expansion.py places the original
+            # question at index 0, the expanded variations after it.)
             for doc in docs:
-                # Use first 200 chars as content hash for dedup
+                # Use first 200 chars as content hash
                 content_hash = hash(doc.content[:200])
-
-                # The original question is at index 0 — track its hits so they win
-                # ties without mutating any scores (similarity across different
-                # queries isn't directly comparable, so we never boost).
                 if i == 0:
                     original_hashes.add(content_hash)
 
-                # Keep the highest cosine seen for each piece of content
                 if content_hash not in all_docs or doc.similarity_score > all_docs[content_hash].similarity_score:
                     all_docs[content_hash] = doc
 
-        # Sort by cosine; on ties prefer docs that matched the original question.
+        # Order by cosine similarity; on ties, prefer docs that matched the original
+        # question over those found only by an expanded variation. (No score mutation —
+        # the per-variation hybrid_search already gated each result by threshold.)
         ranked = sorted(
             all_docs.items(),
             key=lambda kv: (kv[1].similarity_score, kv[0] in original_hashes),
@@ -545,13 +519,14 @@ async def retrieve_documents(embedding: List[float], original_question: str = No
             bm25_weight=0.4  # 60% semantic, 40% BM25 - favors semantic but includes keyword matches
         )
 
-    # Adaptive relevance cutoff BEFORE injection so curated 1.0 scores don't skew
-    # the best-match anchor.
+    # Adaptive relevance cutoff: drop the long tail of marginally-relevant docs by
+    # keeping only those competitive with the best match. Applied BEFORE injection so
+    # the curated docs (pinned at INJECTED_DOC_SCORE=1.0) don't poison the anchor.
     documents = _apply_relative_cutoff(documents)
 
-    # Relevance-gated curated-doc injection (pricing, AI agents, autoscaling,
-    # Node.js, tutorials) — only adds a canonical doc if it wasn't already
-    # retrieved, and never grows the set past rag_top_k.
+    # Curated-doc injection (replace-weakest): ensure the canonical doc for a matched
+    # topic is present and top-ranked, without padding the count past rag_top_k.
+    # Data-driven — see INJECTION_RULES / inject_curated_docs.
     if original_question:
         documents = await inject_curated_docs(original_question, documents)
 
@@ -570,5 +545,6 @@ async def retrieve_documents(embedding: List[float], original_question: str = No
     return {
         "documents": documents,
         "avg_similarity": avg_similarity,
-        "cost_usd": total_cost
+        "cost_usd": total_cost,
+        "queries_count": queries_count,
     }

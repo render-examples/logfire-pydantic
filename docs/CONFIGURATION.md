@@ -10,8 +10,6 @@ Complete reference for all configuration options in the Ask Render Anything Assi
 - [RAG Configuration](#rag-configuration)
 - [Performance Tuning](#performance-tuning)
 
-> The pipeline runs as a single linear pass. There are no iteration or quality-gate knobs to configure.
-
 ---
 
 ## Environment Variables
@@ -205,8 +203,6 @@ CHUNK_OVERLAP = 200  # Overlap between chunks for continuity
 # Minimum chunk size
 MIN_CHUNK_SIZE = 100  # Discard very small chunks
 ```
-
-> **Note:** The evaluation and accuracy stages still produce a `quality_score` and `accuracy_score` that are stored on each session, but these are informational only. The pipeline does not gate on them or iterate, so there are no threshold settings to configure.
 
 ---
 

@@ -3,15 +3,15 @@
 import asyncio
 from typing import List
 
-from pydantic_ai import Agent, Embedder, EmbeddingSettings
+from pydantic_ai import Embedder, EmbeddingSettings
 from pydantic_ai.embeddings.openai import OpenAIEmbeddingModel
-from pydantic_ai.models.openai import OpenAIModel as OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from backend.config import settings, PipelineConfig
 from backend.database import vector_store
 from backend.models import Claim, ClaimVerdict
 from backend.observability import instrument_stage, calculate_embedding_cost, calculate_openai_cost
+from backend.pipeline._agents import openai_agent
 import logfire
 
 
@@ -26,9 +26,8 @@ embedder = Embedder(
 
 
 # Number of candidate passages to surface to the entailment judge per claim.
-# Raised from 5 to 10: now that the HNSW index returns the true nearest matches,
-# handing the judge the correct chunk plus a few neighbors is cheap insurance for
-# verification recall.
+# 10 (not 5) gives the judge the correctly-retrieved chunk plus a few neighbors;
+# cheap insurance now that the HNSW index actually returns the true nearest matches.
 _CANDIDATE_K = 10
 
 
@@ -45,10 +44,8 @@ passage states it almost verbatim, ~0.6-0.8 when it is clearly implied, lower wh
 - Use ONLY the provided passages. Do NOT rely on outside knowledge."""
 
 
-_verification_agent = Agent(
-    OpenAIChatModel(settings.claims_model, provider=OpenAIProvider(api_key=settings.openai_api_key)),
-    output_type=ClaimVerdict,
-    instructions=VERIFICATION_INSTRUCTIONS,
+_verification_agent = openai_agent(
+    settings.claims_model, VERIFICATION_INSTRUCTIONS, output_type=ClaimVerdict
 )
 
 
@@ -92,10 +89,10 @@ Decide whether the passages substantiate the claim."""
     output_tokens = usage.response_tokens or 0
 
     # Map the cited passage indices back to their sources (guard against out-of-range).
+    # If the judge supports the claim but names no passage, we leave the citation list
+    # empty rather than fabricating one from the top retrieved doc — an honest
+    # "verified, no specific source cited" beats a possibly-wrong attribution.
     cited = [docs[i - 1].source for i in verdict.supporting_doc_indices if 1 <= i <= len(docs)]
-    # Fall back to the top retrieved source when the judge supports but cites nothing.
-    if verdict.supported and not cited:
-        cited = [docs[0].source]
 
     verification_score = verdict.confidence if verdict.supported else 0.0
 
@@ -168,4 +165,5 @@ async def verify_claims(claims: List[str]) -> dict:
         "verified_claims": verified_claims,
         "verification_rate": verification_rate,
         "cost_usd": cost_usd,
+        "tokens_used": judge_input_tokens + judge_output_tokens,
     }

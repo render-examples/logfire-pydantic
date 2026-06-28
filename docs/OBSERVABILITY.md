@@ -228,8 +228,7 @@ Logfire stores all telemetry in a queryable database. Use SQL to analyze pattern
 SELECT 
     session_id, 
     question_length, 
-    total_cost_usd, 
-    quality_score
+    total_cost_usd
 FROM logs
 WHERE total_cost_usd > 0.10
 ORDER BY total_cost_usd DESC
@@ -247,19 +246,6 @@ FROM logs
 WHERE event_type = 'Pipeline execution completed'
 GROUP BY DATE(timestamp)
 HAVING AVG(quality_score) < 85;
-```
-
-### Analyze Quality Distribution
-
-```sql
-SELECT 
-    WIDTH_BUCKET(quality_score, 0, 100, 10) * 10 as score_bucket,
-    COUNT(*) as request_count,
-    AVG(total_cost_usd) as avg_cost
-FROM logs
-WHERE event_type = 'Pipeline execution completed'
-GROUP BY score_bucket
-ORDER BY score_bucket;
 ```
 
 ### Track Cost Efficiency
@@ -303,7 +289,6 @@ Create custom dashboards to visualize key metrics.
 - Average response time
 - Cost per request
 - Success/failure rates
-- Quality score distribution
 
 **SQL Query:**
 
@@ -363,7 +348,7 @@ SELECT
 FROM pipeline_executions
 WHERE timestamp > NOW() - INTERVAL '7 days'
 GROUP BY question_category
-ORDER BY avg_score ASC;
+ORDER BY avg_score DESC;
 ```
 
 ---

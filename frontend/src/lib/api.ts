@@ -4,6 +4,25 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 const POLL_INTERVAL_MS = 1500
 
+const CLIENT_ID_KEY = 'client_id'
+
+/**
+ * Stable anonymous identifier for this browser, used to scope Q&A history to
+ * the current user (the app has no auth). Generated once and persisted in
+ * localStorage; resets if the user clears storage or switches devices.
+ */
+export function getClientId(): string {
+  // SSR / non-browser: no stable storage, so return a throwaway id.
+  if (typeof window === 'undefined') return 'ssr'
+
+  let clientId = window.localStorage.getItem(CLIENT_ID_KEY)
+  if (!clientId) {
+    clientId = crypto.randomUUID()
+    window.localStorage.setItem(CLIENT_ID_KEY, clientId)
+  }
+  return clientId
+}
+
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms)
@@ -22,9 +41,10 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
  * Ask a question via the Workflows-backed pipeline.
  *
  * The gateway triggers a Render Workflow run and we poll it for the result.
- * Token-by-token streaming is no longer available (the pipeline runs
- * out-of-band in the Workflow service), so `onAnswerToken` is unused and
- * `onProgress` receives coarse status updates while the run is in flight.
+ * The pipeline runs out-of-band in the Workflow service, so token-by-token
+ * answer streaming is unavailable (`onAnswerToken` is unused). The orchestrator
+ * records real per-stage progress under a token, which we poll alongside the
+ * run status and replay through `onProgress` as each new stage lands.
  */
 export async function askQuestion(
   question: string,
@@ -36,7 +56,7 @@ export async function askQuestion(
   const startResponse = await fetch(`${API_BASE_URL}/ask`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, client_id: getClientId() }),
     signal,
   })
 
@@ -44,22 +64,27 @@ export async function askQuestion(
     throw new Error(`API error: ${startResponse.statusText}`)
   }
 
-  const { run_id: runId } = (await startResponse.json()) as { run_id: string }
+  const { run_id: runId, progress_token: progressToken } = (await startResponse.json()) as {
+    run_id: string
+    progress_token?: string
+  }
 
-  onProgress?.({
-    stage: 'pipeline',
-    status: 'started',
-    message: 'Running the answer pipeline…',
-    progress: 10,
-    cost_so_far: 0,
-  })
+  const progressQuery = progressToken ? `?progress_token=${encodeURIComponent(progressToken)}` : ''
 
-  // 2. Poll for completion.
-  let polls = 0
+  // 2. Poll for completion. The server returns the cumulative list of stage
+  //    updates each time; replay only the ones we haven't surfaced yet.
+  let seen = 0
+  const replayNew = (updates?: ProgressUpdate[]) => {
+    if (!updates || !onProgress) return
+    for (; seen < updates.length; seen++) {
+      onProgress(updates[seen])
+    }
+  }
+
   while (true) {
     await delay(POLL_INTERVAL_MS, signal)
 
-    const pollResponse = await fetch(`${API_BASE_URL}/ask/${runId}`, { signal })
+    const pollResponse = await fetch(`${API_BASE_URL}/ask/${runId}${progressQuery}`, { signal })
     if (!pollResponse.ok) {
       throw new Error(`API error: ${pollResponse.statusText}`)
     }
@@ -68,32 +93,18 @@ export async function askQuestion(
       status: 'running' | 'done' | 'failed'
       result?: AnswerResponse
       error?: string
+      updates?: ProgressUpdate[]
     }
 
+    replayNew(data.updates)
+
     if (data.status === 'done' && data.result) {
-      onProgress?.({
-        stage: 'pipeline',
-        status: 'completed',
-        message: 'Answer ready',
-        progress: 100,
-        cost_so_far: data.result.total_cost ?? 0,
-      })
       return data.result
     }
 
     if (data.status === 'failed') {
       throw new Error(data.error || 'Pipeline run failed')
     }
-
-    // Still running — nudge the progress bar toward (but never reaching) 90%.
-    polls += 1
-    onProgress?.({
-      stage: 'pipeline',
-      status: 'started',
-      message: 'Running the answer pipeline…',
-      progress: Math.min(10 + polls * 8, 90),
-      cost_so_far: 0,
-    })
   }
 }
 
@@ -123,7 +134,9 @@ export interface HistorySession {
 }
 
 export async function getHistory(limit: number = 20): Promise<HistorySession[]> {
-  const response = await fetch(`${API_BASE_URL}/history?limit=${limit}`)
+  const response = await fetch(
+    `${API_BASE_URL}/history?limit=${limit}&client_id=${encodeURIComponent(getClientId())}`
+  )
   
   if (!response.ok) {
     throw new Error(`Failed to fetch history: ${response.statusText}`)
@@ -134,7 +147,9 @@ export async function getHistory(limit: number = 20): Promise<HistorySession[]> 
 }
 
 export async function getSession(sessionId: string): Promise<HistorySession> {
-  const response = await fetch(`${API_BASE_URL}/history/${sessionId}`)
+  const response = await fetch(
+    `${API_BASE_URL}/history/${sessionId}?client_id=${encodeURIComponent(getClientId())}`
+  )
   
   if (!response.ok) {
     throw new Error(`Failed to fetch session: ${response.statusText}`)
@@ -144,9 +159,12 @@ export async function getSession(sessionId: string): Promise<HistorySession> {
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/history/${sessionId}`, {
-    method: 'DELETE',
-  })
+  const response = await fetch(
+    `${API_BASE_URL}/history/${sessionId}?client_id=${encodeURIComponent(getClientId())}`,
+    {
+      method: 'DELETE',
+    }
+  )
   
   if (!response.ok) {
     throw new Error(`Failed to delete session: ${response.statusText}`)
@@ -154,9 +172,12 @@ export async function deleteSession(sessionId: string): Promise<void> {
 }
 
 export async function clearAllHistory(): Promise<{ count: number }> {
-  const response = await fetch(`${API_BASE_URL}/history`, {
-    method: 'DELETE',
-  })
+  const response = await fetch(
+    `${API_BASE_URL}/history?client_id=${encodeURIComponent(getClientId())}`,
+    {
+      method: 'DELETE',
+    }
+  )
   
   if (!response.ok) {
     throw new Error(`Failed to clear history: ${response.statusText}`)

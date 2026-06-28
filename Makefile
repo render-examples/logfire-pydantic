@@ -1,7 +1,7 @@
 # Makefile for Ask Render Anything Assistant
 # Simplifies common development tasks
 
-.PHONY: help install dev-setup db-start db-stop db-reset ingest crawl-tutorials embed-tutorials add-pricing add-ai-agent add-autoscaling add-nodejs add-tutorials-index run-backend run-frontend test clean
+.PHONY: help install dev-setup db-start db-stop db-reset ingest crawl-tutorials embed-tutorials add-pricing add-ai-agent add-autoscaling add-nodejs add-tutorials-index run-backend run-frontend clean
 
 help:
 	@echo "Ask Render Anything Assistant - Development Commands"
@@ -25,7 +25,6 @@ help:
 	@echo "Development:"
 	@echo "  make run-backend   - Run backend API (port 8000)"
 	@echo "  make run-frontend  - Run frontend dev server (port 3000)"
-	@echo "  make test          - Run tests"
 	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean         - Clean up build artifacts"
@@ -88,13 +87,8 @@ ingest:
 	@echo "📊 Loading embeddings into database..."
 	uv run python data/scripts/ingest_docs.py
 	@echo ""
-	@echo "🏷️  Adding special pages (pricing, AI agent, autoscaling, Node.js)..."
-	uv run python data/scripts/add_pricing_page.py
-	uv run python data/scripts/add_workflows_tutorial_page.py
-	uv run python data/scripts/add_workflows_docs_page.py
-	uv run python data/scripts/add_autoscaling_page.py
-	uv run python data/scripts/add_nodejs_page.py
-	uv run python data/scripts/add_tutorials_index_page.py
+	@echo "🏷️  Adding curated live sources (pricing, AI agent, autoscaling, Node.js, tutorials index)..."
+	uv run python data/scripts/ingest_pages.py
 	@echo "✅ Documentation ingested!"
 
 crawl-tutorials:
@@ -112,33 +106,32 @@ add-pricing:
 	@echo "🏷️  Adding Render pricing page to vector database..."
 	@echo "This adds accurate pricing tables for all Render services"
 	@echo ""
-	uv run python data/scripts/add_pricing_page.py
+	uv run python data/scripts/ingest_pages.py pricing
 	@echo "✅ Pricing data added!"
 
 add-ai-agent:
 	@echo "🤖 Adding Render Workflows agents tutorial + docs to vector database..."
 	@echo "This ensures 'how do I deploy an AI agent on Render?' answers with Workflows"
 	@echo ""
-	uv run python data/scripts/add_workflows_tutorial_page.py
-	uv run python data/scripts/add_workflows_docs_page.py
+	uv run python data/scripts/ingest_pages.py workflows_tutorial workflows_docs
 	@echo "✅ AI agent (Workflows tutorial + docs) context added!"
 
 add-autoscaling:
 	@echo "📈 Adding autoscaling documentation to vector database..."
 	@echo ""
-	uv run python data/scripts/add_autoscaling_page.py
+	uv run python data/scripts/ingest_pages.py autoscaling
 	@echo "✅ Autoscaling docs added!"
 
 add-nodejs:
 	@echo "🟩 Adding Node.js deployment documentation to vector database..."
 	@echo ""
-	uv run python data/scripts/add_nodejs_page.py
+	uv run python data/scripts/ingest_pages.py nodejs
 	@echo "✅ Node.js docs added!"
 
 add-tutorials-index:
 	@echo "📚 Adding render.com/tutorials index recommendation to vector database..."
 	@echo ""
-	uv run python data/scripts/add_tutorials_index_page.py
+	uv run python data/scripts/ingest_pages.py tutorials_index
 	@echo "✅ Tutorials index recommendation added!"
 
 run-backend:
@@ -152,10 +145,6 @@ run-frontend:
 	@echo ""
 	cd frontend && npm run dev
 
-test:
-	@echo "🧪 Running tests..."
-	uv run pytest backend/tests/ -v
-
 clean:
 	@echo "🧹 Cleaning up..."
 	rm -rf .venv
@@ -164,7 +153,6 @@ clean:
 	rm -rf frontend/out
 	rm -rf backend/__pycache__
 	rm -rf backend/**/__pycache__
-	rm -rf .pytest_cache
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete
 	@echo "✅ Cleanup complete"

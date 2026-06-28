@@ -9,11 +9,10 @@ from backend.config import settings
 from backend.models import Document
 import logfire
 
-# Stable key for the schema-init advisory lock. Many instances may call
-# initialize() concurrently (ingest fan-out, gateway startup racing a QA run),
-# each re-running the full DDL. A transaction-scoped advisory lock on this key
-# serializes that block so concurrent CREATE OR REPLACE FUNCTION / CREATE TRIGGER
-# against shared catalog rows don't raise "tuple concurrently updated".
+
+# Stable key so all instances contend on the same advisory lock when
+# initializing the schema concurrently (e.g. the ingest_all fan-out runs
+# many ingest_source tasks, each calling initialize() on a fresh instance).
 _SCHEMA_INIT_LOCK_KEY = 0x70796167  # "pyag"
 
 
@@ -35,13 +34,21 @@ class VectorStore:
             command_timeout=60
         )
         
-        # Create tables and enable pgvector
+        # Create tables and enable pgvector. Serialize the schema DDL with a
+        # transaction-scoped advisory lock: many instances may call initialize()
+        # at once (the ingest_all fan-out runs an ingest_source per source on its
+        # own instance), and concurrent CREATE OR REPLACE FUNCTION / DROP+CREATE
+        # TRIGGER against the same catalog rows otherwise raises "tuple
+        # concurrently updated". Only one instance runs the block at a time; the
+        # rest wait, then re-run the now-idempotent statements. The lock releases
+        # automatically when the transaction commits.
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute("SELECT pg_advisory_xact_lock($1)", _SCHEMA_INIT_LOCK_KEY)
+
                 # Enable pgvector extension
                 await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            
+
                 # Create documents table
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS documents (
@@ -56,55 +63,59 @@ class VectorStore:
                         created_at TIMESTAMP DEFAULT NOW()
                     )
                 """)
-            
+
                 # Create index for vector similarity search.
-                # HNSW (not IVFFlat): the old ivfflat index with lists=100 + pgvector's
-                # default probes=1 scanned only ~1% of rows per query, so the true nearest
-                # neighbor was frequently missed — claims went unverified even when a
-                # supporting chunk existed at cosine > 0.7. HNSW gives effectively exact
-                # recall at this corpus scale with no probe tuning.
+                # HNSW, not ivfflat: the old ivfflat (lists=100) index had
+                # catastrophic recall on this corpus — with pgvector's default
+                # ivfflat.probes=1 each query scanned only ~1 of 100 lists
+                # (~1% of rows), so the true #1 nearest neighbor was frequently
+                # never retrieved, leaving claims unverifiable (0% confidence)
+                # even though their supporting chunk matched at cosine >0.7.
+                # HNSW gives effectively exact recall at this scale (and scales
+                # far better) with no probe tuning. Drop the old index first so
+                # existing deployments migrate on their next initialize().
                 await conn.execute("DROP INDEX IF EXISTS documents_embedding_idx")
                 await conn.execute("""
                     CREATE INDEX IF NOT EXISTS documents_embedding_hnsw_idx
                     ON documents USING hnsw (embedding vector_cosine_ops)
                 """)
-            
+
                 # Create index for source lookups
                 await conn.execute("""
-                    CREATE INDEX IF NOT EXISTS documents_source_idx 
+                    CREATE INDEX IF NOT EXISTS documents_source_idx
                     ON documents(source)
                 """)
-            
+
                 # Create GIN index for full-text search
                 await conn.execute("""
-                    CREATE INDEX IF NOT EXISTS documents_content_tsv_idx 
+                    CREATE INDEX IF NOT EXISTS documents_content_tsv_idx
                     ON documents USING gin(content_tsv)
                 """)
-            
+
                 # Create trigger function for auto-updating tsvector
                 await conn.execute("""
                     CREATE OR REPLACE FUNCTION documents_tsvector_trigger() RETURNS trigger AS $$
                     BEGIN
-                        NEW.content_tsv := to_tsvector('english', 
-                            coalesce(NEW.title, '') || ' ' || 
-                            coalesce(NEW.section, '') || ' ' || 
+                        NEW.content_tsv := to_tsvector('english',
+                            coalesce(NEW.title, '') || ' ' ||
+                            coalesce(NEW.section, '') || ' ' ||
                             coalesce(NEW.content, '')
                         );
                         RETURN NEW;
                     END
                     $$ LANGUAGE plpgsql;
                 """)
-            
+
                 # Create trigger to auto-update tsvector on insert/update
                 await conn.execute("""
                     DROP TRIGGER IF EXISTS documents_tsvector_update ON documents;
-                
-                    CREATE TRIGGER documents_tsvector_update 
+
+                    CREATE TRIGGER documents_tsvector_update
                     BEFORE INSERT OR UPDATE ON documents
-                    FOR EACH ROW 
+                    FOR EACH ROW
                     EXECUTE FUNCTION documents_tsvector_trigger();
                 """)
-            
+
                 # Create sessions table for Q&A history
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS qa_sessions (
@@ -119,28 +130,71 @@ class VectorStore:
                         total_duration_ms FLOAT NOT NULL,
                         trace_id TEXT,
                         stages JSONB DEFAULT '[]',
+                        client_id TEXT,
                         created_at TIMESTAMP DEFAULT NOW()
                     )
                 """)
-            
-                # Migration: drop the legacy iterations column on existing databases.
-                # The refinement loop was removed (single linear pass), so sessions no
-                # longer track an iteration count. IF EXISTS keeps this idempotent and
-                # a no-op on fresh databases.
-                await conn.execute("ALTER TABLE qa_sessions DROP COLUMN IF EXISTS iterations")
+
+                # Migration: the pipeline is now a single linear pass, so the
+                # refinement-loop `iterations` column is obsolete. Drop it from
+                # pre-existing deployments (idempotent; no-op on fresh tables).
+                await conn.execute(
+                    "ALTER TABLE qa_sessions DROP COLUMN IF EXISTS iterations"
+                )
+
+                # Migration: history is now scoped per anonymous browser client.
+                # Add the owner column to pre-existing deployments (idempotent).
+                # Legacy rows keep NULL client_id and are naturally excluded from
+                # any client's history, since history queries filter by equality.
+                await conn.execute(
+                    "ALTER TABLE qa_sessions ADD COLUMN IF NOT EXISTS client_id TEXT"
+                )
 
                 # Create index for recent sessions
                 await conn.execute("""
                     CREATE INDEX IF NOT EXISTS qa_sessions_created_at_idx
                     ON qa_sessions(created_at DESC)
                 """)
-            
+
+                # Composite index for the per-client recent-sessions query
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS qa_sessions_client_created_idx
+                    ON qa_sessions(client_id, created_at DESC)
+                """)
+
                 # Create index for trace_id lookups
                 await conn.execute("""
-                    CREATE INDEX IF NOT EXISTS qa_sessions_trace_id_idx 
+                    CREATE INDEX IF NOT EXISTS qa_sessions_trace_id_idx
                     ON qa_sessions(trace_id)
                 """)
-        
+
+                # Live per-stage progress for in-flight pipeline runs. The pipeline
+                # writes here as it advances through stages; the gateway reads it
+                # while polling so the UI can show real stage-by-stage feedback.
+                # One short-lived row per run, keyed by an opaque progress token.
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS pipeline_progress (
+                        token TEXT PRIMARY KEY,
+                        updates JSONB NOT NULL DEFAULT '[]',
+                        updated_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+
+                # Terminal status + result for an in-process pipeline run. POST /ask
+                # launches the pipeline as a background task and inserts a 'running'
+                # row here; the task flips it to 'done' (with the result) or 'failed'
+                # (with the error). GET /ask/{run_id} reads this — there is no longer
+                # a Workflows run to poll. One short-lived row per run, swept after a day.
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS pipeline_runs (
+                        run_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        result JSONB,
+                        error TEXT,
+                        updated_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+
         logfire.info("Database initialized successfully")
     
     async def close(self):
@@ -344,14 +398,17 @@ class VectorStore:
             for rank, row in enumerate(semantic_rows, start=1):
                 doc_id = row['id']
                 semantic_rrf = 1.0 / (rrf_k + rank)
-                
+
                 if doc_id not in doc_scores:
                     doc_scores[doc_id] = {
                         'semantic_rrf': 0.0,
                         'bm25_rrf': 0.0,
+                        # Carry the true cosine similarity (0-1) so it stays interpretable;
+                        # RRF below is used only for *ordering*, never as the returned score.
+                        'cosine': float(row['similarity_score']),
                         'row': row
                     }
-                
+
                 doc_scores[doc_id]['semantic_rrf'] = semantic_rrf
             
             # Add BM25 search rankings
@@ -363,7 +420,7 @@ class VectorStore:
                     # This doc was in BM25 but not semantic results
                     # Fetch the semantic score for it
                     semantic_row = await conn.fetchrow("""
-                        SELECT 
+                        SELECT
                             id,
                             content,
                             source,
@@ -374,38 +431,41 @@ class VectorStore:
                         FROM documents
                         WHERE id = $2
                     """, embedding_str, doc_id)
-                    
+
                     doc_scores[doc_id] = {
                         'semantic_rrf': 0.0,
                         'bm25_rrf': 0.0,
+                        # A BM25-only hit's cosine may be low; if we can't fetch it, 0.0
+                        # keeps it out of the relevance gate below.
+                        'cosine': float(semantic_row['similarity_score']) if semantic_row else 0.0,
                         'row': semantic_row or row
                     }
-                
+
                 doc_scores[doc_id]['bm25_rrf'] = bm25_rrf
             
-            # Combine scores with weights. RRF decides *ordering*; we carry the true
-            # cosine alongside it so the returned similarity_score is interpretable
-            # (0-1) and the relevance gate below operates on real similarity rather
-            # than off-scale RRF values (~0.008).
+            # Combine scores with weights (RRF is used only to ORDER the fused set)
             ranked_docs = []
             for doc_id, scores in doc_scores.items():
-                row = scores['row']
+                # Weighted RRF combination
                 combined_score = (
                     (1 - bm25_weight) * scores['semantic_rrf'] +
                     bm25_weight * scores['bm25_rrf']
                 )
-                # similarity_score on the row is the cosine from the semantic query
-                # (1 - cosine_distance). BM25-only docs are back-filled with it above;
-                # default to 0.0 only if that back-fill somehow missed.
-                cosine = float(row['similarity_score']) if 'similarity_score' in row.keys() else 0.0
-                ranked_docs.append((combined_score, cosine, row))
 
-            # Relevance gate: keep only docs whose true cosine clears the threshold,
-            # so the result count varies with the question instead of being a fixed
-            # quota. Order survivors by RRF, then cap at k.
+                ranked_docs.append((combined_score, scores['cosine'], scores['row']))
+
+            # Relevance gate: keep only docs whose cosine similarity clears the
+            # threshold. This is applied to the FINAL set (not just the semantic
+            # candidate pool), so the number of results reflects how relevant the
+            # corpus actually is to the question — it is no longer a fixed quota.
+            # Tradeoff: a purely-lexical BM25 hit with low semantic similarity is
+            # dropped here; `similarity_threshold` is the knob for that.
             gated = [t for t in ranked_docs if t[1] >= threshold]
+
+            # Order survivors by the hybrid RRF score, then cap at k (a ceiling).
             gated.sort(key=lambda x: x[0], reverse=True)
 
+            # Convert to Document objects, reporting the interpretable cosine score.
             documents = []
             for combined_score, cosine, row in gated[:k]:
                 # Parse metadata if it's a string
@@ -416,7 +476,7 @@ class VectorStore:
                 doc = Document(
                     content=row['content'],
                     source=row['source'],
-                    similarity_score=cosine,  # interpretable cosine, not RRF
+                    similarity_score=float(cosine),
                     metadata={
                         'title': row['title'],
                         'section': row['section'],
@@ -483,49 +543,142 @@ class VectorStore:
         total_cost: float,
         total_duration_ms: float,
         trace_id: Optional[str] = None,
-        stages: Optional[list] = None
+        stages: Optional[list] = None,
+        client_id: Optional[str] = None
     ) -> str:
         """Save a Q&A session to the database."""
-        
+
         if not self.pool:
             raise RuntimeError("Database pool not initialized")
-        
+
         # Convert lists to JSON strings for JSONB columns
         sources_json = json.dumps(sources)
         claims_json = json.dumps(claims)
         evaluations_json = json.dumps(evaluations)
         stages_json = json.dumps(stages or [])
-        
+
         async with self.pool.acquire() as conn:
             result = await conn.fetchrow("""
                 INSERT INTO qa_sessions
                 (question, answer, sources, claims, evaluations, quality_score,
-                 total_cost, total_duration_ms, trace_id, stages)
-                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10::jsonb)
+                 total_cost, total_duration_ms, trace_id, stages, client_id)
+                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10::jsonb, $11)
                 RETURNING id
             """, question, answer, sources_json, claims_json, evaluations_json,
-                quality_score, total_cost, total_duration_ms, trace_id, stages_json)
+                quality_score, total_cost, total_duration_ms, trace_id, stages_json,
+                client_id)
             
             session_id = str(result['id'])
             logfire.info(f"Saved Q&A session: {session_id}", trace_id=trace_id)
             return session_id
-    
-    async def get_recent_sessions(self, limit: int = 20) -> list[dict]:
-        """Get recent Q&A sessions."""
-        
+
+    async def record_progress(self, token: str, updates: list[dict]) -> None:
+        """Upsert the live progress for an in-flight run, keyed by ``token``.
+
+        Called by the Workflows orchestrator after each stage. There is a single
+        writer per token (the orchestrator runs its stages sequentially), so we
+        simply rewrite the full cumulative ``updates`` list each time. Stale rows
+        from earlier runs are swept opportunistically so the table stays small.
+        Best-effort: progress reporting must never break the pipeline.
+        """
+        if not self.pool:
+            return
+
+        updates_json = json.dumps(updates)
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO pipeline_progress (token, updates, updated_at)
+                VALUES ($1, $2::jsonb, NOW())
+                ON CONFLICT (token) DO UPDATE
+                SET updates = EXCLUDED.updates, updated_at = NOW()
+            """, token, updates_json)
+            await conn.execute(
+                "DELETE FROM pipeline_progress WHERE updated_at < NOW() - INTERVAL '1 day'"
+            )
+
+    async def get_progress(self, token: str) -> list[dict]:
+        """Return the cumulative progress updates recorded for ``token`` (or [])."""
+        if not self.pool:
+            return []
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT updates FROM pipeline_progress WHERE token = $1", token
+            )
+        if not row or row["updates"] is None:
+            return []
+        updates = row["updates"]
+        return json.loads(updates) if isinstance(updates, str) else updates
+
+    async def set_run_status(
+        self,
+        run_id: str,
+        status: str,
+        result: Optional[dict] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Upsert the terminal status of an in-process pipeline run.
+
+        POST /ask inserts a ``running`` row, then the background task flips it to
+        ``done`` (with ``result``) or ``failed`` (with ``error``). Stale rows from
+        earlier runs are swept opportunistically so the table stays small.
+        """
+        if not self.pool:
+            return
+
+        result_json = json.dumps(result) if result is not None else None
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO pipeline_runs (run_id, status, result, error, updated_at)
+                VALUES ($1, $2, $3::jsonb, $4, NOW())
+                ON CONFLICT (run_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    result = EXCLUDED.result,
+                    error = EXCLUDED.error,
+                    updated_at = NOW()
+            """, run_id, status, result_json, error)
+            await conn.execute(
+                "DELETE FROM pipeline_runs WHERE updated_at < NOW() - INTERVAL '1 day'"
+            )
+
+    async def get_run_status(self, run_id: str) -> Optional[dict]:
+        """Return ``{status, result, error}`` for a run, or None if unknown."""
+        if not self.pool:
+            return None
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status, result, error FROM pipeline_runs WHERE run_id = $1",
+                run_id,
+            )
+        if not row:
+            return None
+        result = row["result"]
+        if isinstance(result, str):
+            result = json.loads(result)
+        return {"status": row["status"], "result": result, "error": row["error"]}
+
+    async def get_recent_sessions(self, client_id: str, limit: int = 20) -> list[dict]:
+        """Get recent Q&A sessions for a given browser client.
+
+        Filters by ``client_id`` equality, so legacy rows with a NULL owner are
+        never returned to anyone.
+        """
+
         if not self.pool:
             raise RuntimeError("Database pool not initialized")
-        
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
-                SELECT 
+                SELECT
                     id, question, answer, sources, claims, evaluations,
                     quality_score, total_cost, total_duration_ms,
                     created_at, trace_id, stages
                 FROM qa_sessions
+                WHERE client_id = $1
                 ORDER BY created_at DESC
-                LIMIT $1
-            """, limit)
+                LIMIT $2
+            """, client_id, limit)
             
             sessions = []
             for row in rows:
@@ -579,38 +732,44 @@ class VectorStore:
             
             return session
     
-    async def delete_session(self, session_id: str) -> bool:
-        """Delete a specific Q&A session by ID."""
-        
+    async def delete_session(self, session_id: str, client_id: str) -> bool:
+        """Delete a specific Q&A session by ID, scoped to its owning client.
+
+        A session that exists but belongs to another client is treated as
+        not-deleted (the caller surfaces this as a 404).
+        """
+
         if not self.pool:
             raise RuntimeError("Database pool not initialized")
-        
+
         async with self.pool.acquire() as conn:
             result = await conn.execute("""
                 DELETE FROM qa_sessions
-                WHERE id = $1
-            """, session_id)
-            
+                WHERE id = $1 AND client_id = $2
+            """, session_id, client_id)
+
             # Check if any row was deleted
             deleted = result.split()[-1] != '0'
-            
+
             if deleted:
                 logfire.info(f"Deleted session: {session_id}")
-            
+
             return deleted
-    
-    async def delete_all_sessions(self) -> int:
-        """Delete all Q&A sessions."""
-        
+
+    async def delete_all_sessions(self, client_id: str) -> int:
+        """Delete all Q&A sessions owned by the given client."""
+
         if not self.pool:
             raise RuntimeError("Database pool not initialized")
-        
+
         async with self.pool.acquire() as conn:
-            result = await conn.execute("DELETE FROM qa_sessions")
+            result = await conn.execute(
+                "DELETE FROM qa_sessions WHERE client_id = $1", client_id
+            )
             deleted_count = int(result.split()[-1])
-            
-            logfire.info(f"Deleted all sessions: {deleted_count} total")
-            
+
+            logfire.info(f"Deleted all sessions for client: {deleted_count} total")
+
             return deleted_count
 
 
