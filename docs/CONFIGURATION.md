@@ -8,8 +8,9 @@ Complete reference for all configuration options in the Ask Render Anything Assi
 - [Pipeline Configuration](#pipeline-configuration)
 - [Model Selection](#model-selection)
 - [RAG Configuration](#rag-configuration)
-- [Quality Thresholds](#quality-thresholds)
 - [Performance Tuning](#performance-tuning)
+
+> The pipeline runs as a single linear pass. There are no iteration or quality-gate knobs to configure.
 
 ---
 
@@ -38,10 +39,7 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 These have sensible defaults but can be customized:
 
 ```bash
-# Quality and Iteration Settings
-QUALITY_THRESHOLD=85                     # Minimum quality score (0-100)
-ACCURACY_THRESHOLD=90                    # Minimum accuracy score (0-100)
-MAX_ITERATIONS=3                         # Max refinement attempts
+# Generation Settings
 MAX_TOKENS=2000                          # Answer generation token limit
 
 # RAG Settings
@@ -54,11 +52,11 @@ EMBEDDING_MODEL=text-embedding-3-small   # OpenAI embedding model
 EMBEDDING_DIMENSIONS=1536                # Embedding vector dimensions
 
 # Model Selection
-ANSWER_MODEL=claude-sonnet-4-5-20250929  # Primary answer generation model
+ANSWER_MODEL=claude-sonnet-4-6  # Primary answer generation model
 CLAIMS_MODEL=gpt-5.4-mini                # Claims extraction model
-ACCURACY_MODEL=claude-sonnet-4-20250514  # Accuracy checking model
+ACCURACY_MODEL=claude-sonnet-4-6  # Accuracy checking model
 EVAL_MODEL_OPENAI=gpt-5.4-mini           # OpenAI evaluator model
-EVAL_MODEL_ANTHROPIC=claude-sonnet-4-20250514  # Anthropic evaluator model
+EVAL_MODEL_ANTHROPIC=claude-sonnet-4-6  # Anthropic evaluator model
 
 # Performance Settings
 TIMEOUT_SECONDS=30                       # Per-stage timeout
@@ -79,13 +77,7 @@ Edit `backend/config.py` to customize pipeline behavior:
 
 ```python
 class PipelineConfig:
-    # Quality thresholds
-    QUALITY_THRESHOLD = 85           # Minimum acceptable quality score
-    ACCURACY_THRESHOLD = 90          # Minimum technical accuracy
-    AGREEMENT_THRESHOLD = 10         # Max score difference between evaluators
-    
     # Performance tuning
-    MAX_ITERATIONS = 3               # Maximum refinement attempts
     MAX_TOKENS = 2000                # Output token limit for generation
     TIMEOUT_SECONDS = 30             # Per-stage timeout in seconds
     
@@ -97,10 +89,10 @@ class PipelineConfig:
     EMBEDDING_DIMENSIONS = 1536
     
     # Model selection
-    ANSWER_MODEL = "claude-sonnet-4-5-20250929"
+    ANSWER_MODEL = "claude-sonnet-4-6"
     CLAIMS_MODEL = "gpt-5.4-mini"
-    ACCURACY_MODEL = "claude-sonnet-4-20250514"
-    EVAL_MODELS = ["gpt-5.4-mini", "claude-sonnet-4-20250514"]
+    ACCURACY_MODEL = "claude-sonnet-4-6"
+    EVAL_MODELS = ["gpt-5.4-mini", "claude-sonnet-4-6"]
 ```
 
 ---
@@ -126,39 +118,38 @@ class PipelineConfig:
 #### Anthropic Models
 
 ```python
-"claude-sonnet-4-5-20250929"  # Latest Sonnet, best quality
-"claude-sonnet-4-20250514"    # Previous Sonnet version
-"claude-haiku-4"              # Fast and cheap
-"claude-opus-4"               # Most capable, most expensive
+"claude-opus-4-8"             # Most capable, most expensive
+"claude-sonnet-4-6"           # Latest Sonnet, best balance (default)
+"claude-haiku-4-5"            # Fast and cheap
 ```
 
 ### Model Selection Strategy
 
 **Cost-Optimized:**
 ```python
-ANSWER_MODEL = "claude-haiku-4"          # Cheapest Claude
+ANSWER_MODEL = "claude-haiku-4-5"          # Cheapest Claude
 CLAIMS_MODEL = "gpt-3.5-turbo"           # Cheapest OpenAI
 ACCURACY_MODEL = "gpt-5.4-mini"          # Balance
 EVAL_MODEL_OPENAI = "gpt-3.5-turbo"
-EVAL_MODEL_ANTHROPIC = "claude-haiku-4"
+EVAL_MODEL_ANTHROPIC = "claude-haiku-4-5"
 ```
 
 **Quality-Optimized:**
 ```python
-ANSWER_MODEL = "claude-opus-4"           # Best Anthropic
+ANSWER_MODEL = "claude-opus-4-8"           # Best Anthropic
 CLAIMS_MODEL = "gpt-5.4-mini"            # Best OpenAI for structured output
-ACCURACY_MODEL = "claude-sonnet-4-5-20250929"
+ACCURACY_MODEL = "claude-sonnet-4-6"
 EVAL_MODEL_OPENAI = "gpt-5.4-mini"
-EVAL_MODEL_ANTHROPIC = "claude-opus-4"
+EVAL_MODEL_ANTHROPIC = "claude-opus-4-8"
 ```
 
 **Balanced (Default):**
 ```python
-ANSWER_MODEL = "claude-sonnet-4-5-20250929"  # Good balance
+ANSWER_MODEL = "claude-sonnet-4-6"  # Good balance
 CLAIMS_MODEL = "gpt-5.4-mini"                # Fast and cheap
-ACCURACY_MODEL = "claude-sonnet-4-20250514"  # Reliable
+ACCURACY_MODEL = "claude-sonnet-4-6"  # Reliable
 EVAL_MODEL_OPENAI = "gpt-5.4-mini"
-EVAL_MODEL_ANTHROPIC = "claude-sonnet-4-20250514"
+EVAL_MODEL_ANTHROPIC = "claude-sonnet-4-6"
 ```
 
 ---
@@ -215,41 +206,7 @@ CHUNK_OVERLAP = 200  # Overlap between chunks for continuity
 MIN_CHUNK_SIZE = 100  # Discard very small chunks
 ```
 
----
-
-## Quality Thresholds
-
-### Score Thresholds
-
-```python
-# Minimum quality score to accept answer (0-100)
-QUALITY_THRESHOLD = 85  
-# Lower = fewer iterations, faster responses, lower quality
-# Higher = more iterations, slower responses, higher quality
-
-# Minimum accuracy score (0-100)
-ACCURACY_THRESHOLD = 90
-# How technically accurate must the answer be?
-
-# Maximum score difference between evaluators (0-100)
-AGREEMENT_THRESHOLD = 10
-# If evaluators disagree by more than this, trigger refinement
-```
-
-### Iteration Control
-
-```python
-# Maximum number of refinement iterations
-MAX_ITERATIONS = 3
-# Higher = better quality, higher cost
-# Lower = faster responses, lower cost
-
-# Minimum improvement required to continue iterating
-MIN_IMPROVEMENT = 5  # Score must improve by at least 5 points
-
-# Early stopping if score is very high
-EXCELLENT_THRESHOLD = 95  # Stop iterating if score exceeds this
-```
+> **Note:** The evaluation and accuracy stages still produce a `quality_score` and `accuracy_score` that are stored on each session, but these are informational only. The pipeline does not gate on them or iterate, so there are no threshold settings to configure.
 
 ---
 
@@ -265,7 +222,7 @@ MAX_TOKENS = 1500  # Down from 2000
 RAG_TOP_K = 5  # Down from 10
 
 # Use faster models
-ANSWER_MODEL = "claude-haiku-4"  # Faster than Sonnet
+ANSWER_MODEL = "claude-haiku-4-5"  # Faster than Sonnet
 
 # Disable less critical stages (not recommended)
 ENABLE_CLAIMS_VERIFICATION = False
@@ -276,18 +233,12 @@ ENABLE_ACCURACY_CHECK = False
 
 ```python
 # Use cheaper models
-ANSWER_MODEL = "claude-haiku-4"
+ANSWER_MODEL = "claude-haiku-4-5"
 CLAIMS_MODEL = "gpt-3.5-turbo"
 ACCURACY_MODEL = "gpt-5.4-mini"
 
 # Reduce token limits
 MAX_TOKENS = 1000
-
-# Lower quality threshold (fewer iterations)
-QUALITY_THRESHOLD = 75
-
-# Limit iterations
-MAX_ITERATIONS = 1
 
 # Enable aggressive caching
 ENABLE_CACHING = True
@@ -298,18 +249,12 @@ CACHE_TTL_SECONDS = 3600  # 1 hour
 
 ```python
 # Use best models
-ANSWER_MODEL = "claude-opus-4"
+ANSWER_MODEL = "claude-opus-4-8"
 CLAIMS_MODEL = "gpt-5.4-mini"
-ACCURACY_MODEL = "claude-sonnet-4-5-20250929"
+ACCURACY_MODEL = "claude-sonnet-4-6"
 
 # Increase token limits
 MAX_TOKENS = 3000
-
-# Higher quality threshold
-QUALITY_THRESHOLD = 90
-
-# More iterations allowed
-MAX_ITERATIONS = 5
 
 # More RAG context
 RAG_TOP_K = 15
@@ -330,12 +275,9 @@ TIMEOUT_SECONDS = 60
 MAX_TOKENS = 1500
 ```
 
-**High iteration rate:**
+**Poor retrieval quality:**
 ```python
-# Lower quality threshold
-QUALITY_THRESHOLD = 75
-
-# Or improve RAG retrieval
+# Improve RAG retrieval
 RAG_TOP_K = 15
 SIMILARITY_THRESHOLD = 0.70
 ```
@@ -343,12 +285,8 @@ SIMILARITY_THRESHOLD = 0.70
 **Costs too high:**
 ```python
 # Use cheaper models
-ANSWER_MODEL = "claude-haiku-4"
+ANSWER_MODEL = "claude-haiku-4-5"
 CLAIMS_MODEL = "gpt-3.5-turbo"
-
-# Reduce iterations
-MAX_ITERATIONS = 1
-QUALITY_THRESHOLD = 75
 
 # Reduce token limit
 MAX_TOKENS = 1000
@@ -357,16 +295,13 @@ MAX_TOKENS = 1000
 **Low quality scores:**
 ```python
 # Use better models
-ANSWER_MODEL = "claude-sonnet-4-5-20250929"
+ANSWER_MODEL = "claude-sonnet-4-6"
 
 # More context
 RAG_TOP_K = 15
 
 # More output tokens
 MAX_TOKENS = 2500
-
-# More iterations
-MAX_ITERATIONS = 5
 ```
 
 ---

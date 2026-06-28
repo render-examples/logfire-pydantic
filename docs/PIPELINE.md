@@ -1,17 +1,22 @@
-# The 8-Stage AI Pipeline
+# The 7-Stage AI Pipeline
 
 This document provides a detailed breakdown of each stage in the Q&A pipeline, including instrumentation patterns, costs, and performance characteristics.
 
 ## Pipeline Overview
 
-The pipeline processes questions through eight stages, with automatic quality gates and iterative refinement:
+The pipeline processes questions through seven stages in a single linear pass:
 
 ```
 [1] Embedding → [2] Retrieval → [3] Generation → [4] Claims → 
-[5] Verification → [6] Accuracy → [7] Evaluation → [8] Quality Gate
-                                                         ↓
-                                                    (iterate if needed)
+[5] Verification → [6] Accuracy → [7] Evaluation
 ```
+
+The stage logic below lives in [`backend/pipeline/`](../backend/pipeline/) and is unchanged.
+In production it executes as a **Render Workflows** run: the `run_qa_pipeline` orchestrator
+([`workflows/app.py`](../workflows/app.py)) keeps the cheap stages (1, 2) in-process and
+promotes the heavy LLM stages (3, 4, 5) to their own retried subtasks, with stages 6 + 7
+running as concurrent subtasks on separate instances. See the
+[Architecture section of the README](../README.md#architecture) for the topology.
 
 ---
 
@@ -47,6 +52,8 @@ async def embed_question(text: str) -> List[float]:
 **Purpose:** Find relevant documentation chunks using hybrid search
 
 **Database:** PostgreSQL with pgvector extension + full-text search
+
+**Vector Index:** HNSW (`documents_embedding_hnsw_idx`, `USING hnsw (embedding vector_cosine_ops)`, default build params). At this corpus size HNSW delivers effectively exact recall with no probe/`lists` tuning required.
 
 **Method:** Hybrid Search combining semantic (vector) + lexical (BM25) search
 
@@ -99,7 +106,7 @@ For a technical deep-dive on hybrid search implementation, see [HYBRID_SEARCH.md
 
 **Purpose:** Generate comprehensive answer using retrieved context
 
-**Model:** Claude Sonnet 4.5
+**Model:** Claude Sonnet 4.6
 
 **Context:** RAG documents + conversation history
 
@@ -166,7 +173,7 @@ async def generate_answer(question: str, context: str) -> dict:
 
 **Purpose:** Deep accuracy validation using Claude
 
-**Model:** Claude Sonnet 4
+**Model:** Claude Sonnet 4.6
 
 **Input:** Original answer + claims + verification results
 
@@ -183,7 +190,7 @@ async def generate_answer(question: str, context: str) -> dict:
 
 **Purpose:** Independent quality assessment from two models
 
-**Models:** OpenAI GPT-4o-mini + Anthropic Claude Sonnet 4
+**Models:** OpenAI GPT-4o-mini + Anthropic Claude Sonnet 4.6
 
 **Criteria:**
 - Technical accuracy (30%)
@@ -208,28 +215,7 @@ async def generate_answer(question: str, context: str) -> dict:
 - Cost per evaluation: ~$0.007
 - Inter-rater agreement: 77% (within 10 points)
 
----
-
-## Stage 8: Quality Gate
-
-**Purpose:** Decide whether to return or iterate
-
-**Logic:**
-
-```python
-if average_score >= quality_threshold and iteration < max_iterations:
-    return answer
-else:
-    # Regenerate with feedback from evaluators
-    feedback = merge_evaluator_feedback()
-    iteration += 1
-    goto Stage 3  # with feedback
-```
-
-**Configuration:**
-- Max iterations: 3 (configurable)
-- Quality threshold: 85 (configurable)
-- Success rate: ~88% pass on first iteration
+The `quality_score` and `accuracy_score` produced here are stored on the session, but the pipeline is a single linear pass: the first generated answer is always the one returned. There is no quality gate or regeneration loop.
 
 ---
 
@@ -249,17 +235,15 @@ else:
 │ Accuracy Check (Claude)        │ $0.0180  │   22%    │
 │ Quality Rating (Dual)          │ $0.0070  │    9%    │
 ├────────────────────────────────┼──────────┼──────────┤
-│ TOTAL (first iteration)        │ $0.0798  │  100%    │
-│ TOTAL (if 2 iterations)        │ $0.1346  │          │
+│ TOTAL                          │ $0.0798  │  100%    │
 └────────────────────────────────┴──────────┴──────────┘
 ```
 
 ### Response Time Metrics
 
-- **Average Response Time:** 4.2 seconds (first iteration)
+- **Average Response Time:** 4.2 seconds
 - **P95 Response Time:** 8.7 seconds
 - **P99 Response Time:** 12.3 seconds
-- **Iteration Rate:** 12% of questions require refinement
 
 ### Quality Scores
 
@@ -271,11 +255,11 @@ else:
 ### Question Patterns
 
 ```
-Deployment questions:  35% of traffic, 92% first-try success
-Database questions:    28% of traffic, 78% first-try success  ← Higher iteration rate
-Configuration:         20% of traffic, 88% first-try success
-Pricing/Plans:         10% of traffic, 95% first-try success
-Other:                  7% of traffic, 82% first-try success
+Deployment questions:  35% of traffic
+Database questions:    28% of traffic
+Configuration:         20% of traffic
+Pricing/Plans:         10% of traffic
+Other:                  7% of traffic
 ```
 
 ---
@@ -287,12 +271,11 @@ Other:                  7% of traffic, 82% first-try success
 1. **Lower MAX_TOKENS** - Reduce output token limit for generation
 2. **Use smaller models** - Consider GPT-4o-mini for less critical stages
 3. **Cache frequent questions** - Store common Q&A pairs
-4. **Adjust quality threshold** - Lower threshold to reduce iterations
 
 ### Improving Quality
 
 1. **Improve RAG context** - Add more documentation, refine chunking
-2. **Tune prompts** - Iterate on generation and evaluation prompts
+2. **Tune prompts** - Refine generation and evaluation prompts
 3. **Increase MAX_TOKENS** - Allow more detailed answers for complex questions
 4. **Add examples** - Few-shot examples in prompts
 

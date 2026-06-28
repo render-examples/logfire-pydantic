@@ -1,7 +1,7 @@
 # Makefile for Ask Render Anything Assistant
 # Simplifies common development tasks
 
-.PHONY: help install dev-setup db-start db-stop db-reset ingest add-pricing add-ai-agent add-autoscaling add-nodejs run-backend run-frontend test clean
+.PHONY: help install dev-setup db-start db-stop db-reset ingest crawl-tutorials embed-tutorials add-pricing add-ai-agent add-autoscaling add-nodejs add-tutorials-index run-backend run-frontend test clean
 
 help:
 	@echo "Ask Render Anything Assistant - Development Commands"
@@ -14,9 +14,11 @@ help:
 	@echo "  make db-start      - Start PostgreSQL with Docker"
 	@echo "  make db-stop       - Stop PostgreSQL"
 	@echo "  make db-reset      - Reset database (delete all data)"
-	@echo "  make ingest        - Generate embeddings and load into database (includes all special pages)"
+	@echo "  make ingest        - Generate embeddings and load into database (includes tutorials + all special pages)"
+	@echo "  make crawl-tutorials - Preview the render.com/tutorials crawl (no embeddings)"
+	@echo "  make embed-tutorials - Embed tutorials into the corpus and sync into the DB"
 	@echo "  make add-pricing   - Re-add only the pricing page"
-	@echo "  make add-ai-agent  - Re-add only the AI agent (self-orchestrating-agents) template"
+	@echo "  make add-ai-agent  - Re-add only the AI agent answer (Render Workflows tutorial)"
 	@echo "  make add-autoscaling - Re-add only the autoscaling docs"
 	@echo "  make add-nodejs    - Re-add only the Node.js docs"
 	@echo ""
@@ -41,8 +43,8 @@ dev-setup: install
 	@echo ""
 	@echo "⚙️  Setting up development environment..."
 	@if [ ! -f .env ]; then \
-		cp .env.local .env; \
-		echo "📝 Created .env file from .env.local"; \
+		cp .env.example .env; \
+		echo "📝 Created .env file from .env.example"; \
 		echo "⚠️  Please edit .env and add your API keys!"; \
 	else \
 		echo "✅ .env file already exists"; \
@@ -88,10 +90,23 @@ ingest:
 	@echo ""
 	@echo "🏷️  Adding special pages (pricing, AI agent, autoscaling, Node.js)..."
 	uv run python data/scripts/add_pricing_page.py
-	uv run python data/scripts/add_ai_agent_template_page.py
+	uv run python data/scripts/add_workflows_tutorial_page.py
+	uv run python data/scripts/add_workflows_docs_page.py
 	uv run python data/scripts/add_autoscaling_page.py
 	uv run python data/scripts/add_nodejs_page.py
+	uv run python data/scripts/add_tutorials_index_page.py
 	@echo "✅ Documentation ingested!"
+
+crawl-tutorials:
+	@echo "📚 Previewing render.com/tutorials crawl (discovered pages + chunk counts)..."
+	uv run python data/scripts/crawl_tutorials.py
+
+embed-tutorials:
+	@echo "📚 Embedding render.com/tutorials and merging into the corpus JSON..."
+	uv run python data/scripts/embed_tutorials.py
+	@echo "📊 Loading new tutorial sources into the database..."
+	uv run python data/scripts/ingest_docs.py --sync
+	@echo "✅ Tutorials embedded and ingested!"
 
 add-pricing:
 	@echo "🏷️  Adding Render pricing page to vector database..."
@@ -101,11 +116,12 @@ add-pricing:
 	@echo "✅ Pricing data added!"
 
 add-ai-agent:
-	@echo "🤖 Adding self-orchestrating-agents template page to vector database..."
-	@echo "This ensures AI agent deployment questions get the right context"
+	@echo "🤖 Adding Render Workflows agents tutorial + docs to vector database..."
+	@echo "This ensures 'how do I deploy an AI agent on Render?' answers with Workflows"
 	@echo ""
-	uv run python data/scripts/add_ai_agent_template_page.py
-	@echo "✅ AI agent template added!"
+	uv run python data/scripts/add_workflows_tutorial_page.py
+	uv run python data/scripts/add_workflows_docs_page.py
+	@echo "✅ AI agent (Workflows tutorial + docs) context added!"
 
 add-autoscaling:
 	@echo "📈 Adding autoscaling documentation to vector database..."
@@ -118,6 +134,12 @@ add-nodejs:
 	@echo ""
 	uv run python data/scripts/add_nodejs_page.py
 	@echo "✅ Node.js docs added!"
+
+add-tutorials-index:
+	@echo "📚 Adding render.com/tutorials index recommendation to vector database..."
+	@echo ""
+	uv run python data/scripts/add_tutorials_index_page.py
+	@echo "✅ Tutorials index recommendation added!"
 
 run-backend:
 	@echo "🚀 Starting backend API on http://localhost:8000"

@@ -1,6 +1,6 @@
 """Stage 3: Answer Generation."""
 
-from typing import AsyncGenerator, List, Optional
+from typing import AsyncGenerator, List
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
@@ -14,7 +14,7 @@ import logfire
 ANSWER_GENERATION_INSTRUCTIONS = """You are a helpful technical assistant specializing in Render's cloud platform. Your role is to provide accurate, clear, and actionable answers to developer questions.
 
 ⚠️ CRITICAL: NO HEDGING ALLOWED ⚠️
-You have been provided with 20 documents of relevant context. If the answer is in the context, STATE IT CONFIDENTLY.
+You have been provided with the most relevant documentation as context. If the answer is in the context, STATE IT CONFIDENTLY.
 DO NOT use these phrases unless information is genuinely 100% absent:
 - ❌ "doesn't specify"
 - ❌ "doesn't include"
@@ -35,7 +35,7 @@ CRITICAL ANTI-HALLUCINATION RULES:
    - Workspace plans affect team features and PITR retention, NOT database/datastore specs
 4. If you mention specific plan names, tiers, features, or pricing - they MUST appear verbatim in the provided context
 5. **ANTI-HEDGING RULE**: If information IS in the context, state it confidently without hedging
-   - Check ALL 20 documents thoroughly before claiming anything is missing
+   - Check ALL provided documents thoroughly before claiming anything is missing
    - If you found plans/features/limits in context → State them directly
    - Only use "not specified" if you checked all docs and found nothing
 6. Do NOT create tables, lists, or specifications unless the information is explicitly in the provided documents
@@ -60,7 +60,7 @@ VALIDATION CHECKLIST before answering:
 - [ ] I haven't mixed up different product types (workspace vs database vs service vs key-value)
 - [ ] I haven't invented plan names, features, or specifications
 - [ ] If I list options or tiers, they're quoted from the documentation
-- [ ] I checked ALL 20 documents thoroughly before claiming information is missing
+- [ ] I checked ALL provided documents thoroughly before claiming information is missing
 - [ ] I am NOT using hedging language like "doesn't specify" when the info IS in the context
 
 **PRICING & PLANS INSTRUCTIONS (CRITICAL):**
@@ -74,11 +74,11 @@ When answering questions about pricing, plans, tiers, or costs:
 Example: For "What Key Value plans exist?", check documents from render.com/pricing FIRST before checking other docs.
 
 **AI AGENT & WORKFLOW DEPLOYMENT (CRITICAL):**
-When answering questions about deploying AI agents, LLMs, AI-powered apps, or long-running processes:
-1. AI agents can be deployed on Render **like any other service** — as a web service, background worker, or private service. There is nothing special about AI workloads from a deployment perspective.
-2. For resilient long-running agent processes, **Render Workflows** is the recommended pattern. It provides fault-tolerant orchestration of background tasks.
-3. The **Self-Orchestrating Agents (Python)** template is the canonical example: a FastAPI + React app where a cron-triggered Render Workflow uses the Render Python SDK to fan out scraping and LLM extraction tasks (provider-agnostic — OpenAI or Anthropic), backed by managed Postgres and Redis (Key Value), with real-time progress streamed to the frontend over SSE.
-4. PRIORITIZE documents sourced from 'https://render.com/templates/self-orchestrating-agents-python' when present in context.
+When answering questions about deploying or running AI agents, LLMs, AI-powered apps, or long-running agent processes:
+1. The **best way to run AI agents on Render is Render Workflows**. Lead with this. Agents do long-running, multi-step background work — calling LLMs, fanning out parallel tasks, retrying on failure — and Workflows is the platform primitive built exactly for that.
+2. Render Workflows provides fault-tolerant orchestration, automatic retries, fan-out parallelism, and observable task graphs — turning queue coordination and retry boilerplate teams used to hand-roll into managed infrastructure.
+3. A Workflow task is just a plain async function plus a config object (name, timeout, retry config) that runs in an isolated container; tasks compose through ordinary function calls and the platform handles fan-out, durability, and scaling.
+4. PRIORITIZE the documents sourced from 'https://render.com/tutorials/agents-on-render-workflows/what-youll-build' (the canonical tutorial to point developers to) and 'https://render.com/docs/workflows' (the authoritative Workflows documentation) when present in context. Ground specific claims about Workflows behavior (retries, timeouts, fan-out, SDK, deployment) in the docs.
 5. State AI agent deployment facts confidently — do NOT hedge or imply that deploying AI agents on Render is undocumented or unclear.
 
 **AUTOSCALING & SCALING INSTRUCTIONS (CRITICAL):**
@@ -109,7 +109,6 @@ _answer_agent = Agent(
 async def generate_answer(
     question: str,
     documents: List[Document],
-    feedback: Optional[str] = None
 ) -> dict:
     """
     Generate comprehensive answer using retrieved context.
@@ -117,7 +116,6 @@ async def generate_answer(
     Args:
         question: The user's question
         documents: Retrieved documentation chunks
-        feedback: Optional feedback from previous iteration
 
     Returns:
         dict with 'answer', 'input_tokens', 'output_tokens', 'cost_usd'
@@ -127,7 +125,6 @@ async def generate_answer(
         "Generating answer with Claude",
         num_documents=len(documents),
         question_length=len(question),
-        has_feedback=feedback is not None,
         model=settings.answer_model
     )
 
@@ -144,38 +141,16 @@ async def generate_answer(
 
     context = "\n\n".join(context_parts)
 
-    # Build the user prompt
-    feedback_text = ""
-    if feedback:
-        feedback_text = f"""
-Feedback from quality check:
-{feedback}
-
-⚠️ CRITICAL: When revising, DO NOT:
-- Invent features not explicitly in the provided context
-- Assume features from one product apply to another (e.g., Postgres features ≠ Key Value features)
-- Add plan names/tiers not mentioned in the documentation
-- Generalize "both support X" unless BOTH products explicitly support X in the context
-
-✅ DO:
-- ONLY add details that are explicitly in the provided documents
-- Keep product-specific features separate (clearly label "Postgres:" vs "Key Value:")
-- If adding details about a feature, quote the relevant doc section
-- When in doubt, be LESS comprehensive but MORE accurate
-
-Please revise your answer based on this feedback while maintaining strict accuracy."""
-
     user_prompt = f"""Context from Render documentation:
 {context}
 
 User Question: {question}
-{feedback_text}
 
 Please provide a comprehensive answer that:
 1. Uses ONLY information from the provided context
 2. States facts CONFIDENTLY when they appear in the documentation (no unnecessary hedging!)
 3. Lists specific plans, tiers, features, and limits found in the context
-4. Only says "not specified" if genuinely absent from ALL 20 documents after thorough review
+4. Only says "not specified" if genuinely absent from ALL provided documents after thorough review
 
 Answer:"""
 
@@ -208,7 +183,6 @@ Answer:"""
 async def stream_answer(
     question: str,
     documents: List[Document],
-    feedback: Optional[str] = None
 ) -> AsyncGenerator[tuple[str, object], None]:
     """
     Stream answer tokens from Claude in real-time.
@@ -228,37 +202,16 @@ async def stream_answer(
 
     context = "\n\n".join(context_parts)
 
-    feedback_text = ""
-    if feedback:
-        feedback_text = f"""
-Feedback from quality check:
-{feedback}
-
-⚠️ CRITICAL: When revising, DO NOT:
-- Invent features not explicitly in the provided context
-- Assume features from one product apply to another (e.g., Postgres features ≠ Key Value features)
-- Add plan names/tiers not mentioned in the documentation
-- Generalize "both support X" unless BOTH products explicitly support X in the context
-
-✅ DO:
-- ONLY add details that are explicitly in the provided documents
-- Keep product-specific features separate (clearly label "Postgres:" vs "Key Value:")
-- If adding details about a feature, quote the relevant doc section
-- When in doubt, be LESS comprehensive but MORE accurate
-
-Please revise your answer based on this feedback while maintaining strict accuracy."""
-
     user_prompt = f"""Context from Render documentation:
 {context}
 
 User Question: {question}
-{feedback_text}
 
 Please provide a comprehensive answer that:
 1. Uses ONLY information from the provided context
 2. States facts CONFIDENTLY when they appear in the documentation (no unnecessary hedging!)
 3. Lists specific plans, tiers, features, and limits found in the context
-4. Only says "not specified" if genuinely absent from ALL 20 documents after thorough review
+4. Only says "not specified" if genuinely absent from ALL provided documents after thorough review
 
 Answer:"""
 
@@ -266,7 +219,6 @@ Answer:"""
         "Streaming answer with Claude",
         num_documents=len(documents),
         question_length=len(question),
-        has_feedback=feedback is not None,
         model=settings.answer_model
     )
 

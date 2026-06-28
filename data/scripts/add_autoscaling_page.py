@@ -15,8 +15,7 @@ from bs4 import BeautifulSoup
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from backend.database import vector_store
-from backend.pipeline.embeddings import embed_question
+from curated_ingest import ingest_curated_markdown
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -145,42 +144,19 @@ def build_document_content(scraped_text: str) -> str:
 
 
 async def add_to_vector_store(content: str):
-    """Add the autoscaling document to the vector store."""
-    await vector_store.initialize()
-
-    print("\nRemoving old autoscaling documents...")
-    async with vector_store.pool.acquire() as conn:
-        result = await conn.execute("""
-            DELETE FROM documents
-            WHERE source = $1
-        """, AUTOSCALING_URL)
-        deleted_count = int(result.split()[-1])
-        print(f"   Deleted {deleted_count} old documents")
-
-    print("\nAdding autoscaling document to vector store...")
-
+    """Add the autoscaling doc, section-chunked, replacing any prior copy."""
     if len(content) < 100:
         print("Error: Content too short, aborting")
-        await vector_store.close()
         return
 
-    embed_result = await embed_question(content)
-
-    await vector_store.insert_document(
+    print("\nAdding autoscaling doc (section-aware) to vector store...")
+    await ingest_curated_markdown(
         content=content,
         source=AUTOSCALING_URL,
         title="Autoscaling on Render",
-        embedding=embed_result["embedding"],
         section="Scaling and Autoscaling",
-        metadata={
-            "type": "docs",
-            "category": "autoscaling",
-            "title": "Autoscaling on Render"
-        }
+        metadata={"type": "docs", "category": "autoscaling"},
     )
-
-    await vector_store.close()
-    print("Successfully added 1 autoscaling document!")
 
 
 async def main():

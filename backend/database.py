@@ -2,13 +2,19 @@
 
 import asyncpg
 from typing import Optional
-import numpy as np
 import json
 from contextlib import asynccontextmanager
 
 from backend.config import settings
-from backend.models import Document, DocumentChunk
+from backend.models import Document
 import logfire
+
+# Stable key for the schema-init advisory lock. Many instances may call
+# initialize() concurrently (ingest fan-out, gateway startup racing a QA run),
+# each re-running the full DDL. A transaction-scoped advisory lock on this key
+# serializes that block so concurrent CREATE OR REPLACE FUNCTION / CREATE TRIGGER
+# against shared catalog rows don't raise "tuple concurrently updated".
+_SCHEMA_INIT_LOCK_KEY = 0x70796167  # "pyag"
 
 
 class VectorStore:
@@ -31,97 +37,109 @@ class VectorStore:
         
         # Create tables and enable pgvector
         async with self.pool.acquire() as conn:
-            # Enable pgvector extension
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", _SCHEMA_INIT_LOCK_KEY)
+                # Enable pgvector extension
+                await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             
-            # Create documents table
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS documents (
-                    id SERIAL PRIMARY KEY,
-                    content TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    section TEXT,
-                    metadata JSONB DEFAULT '{}',
-                    embedding vector(1536),
-                    content_tsv tsvector,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
+                # Create documents table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS documents (
+                        id SERIAL PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        section TEXT,
+                        metadata JSONB DEFAULT '{}',
+                        embedding vector(1536),
+                        content_tsv tsvector,
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
             
-            # Create index for vector similarity search
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS documents_embedding_idx 
-                ON documents USING ivfflat (embedding vector_cosine_ops)
-                WITH (lists = 100)
-            """)
+                # Create index for vector similarity search.
+                # HNSW (not IVFFlat): the old ivfflat index with lists=100 + pgvector's
+                # default probes=1 scanned only ~1% of rows per query, so the true nearest
+                # neighbor was frequently missed — claims went unverified even when a
+                # supporting chunk existed at cosine > 0.7. HNSW gives effectively exact
+                # recall at this corpus scale with no probe tuning.
+                await conn.execute("DROP INDEX IF EXISTS documents_embedding_idx")
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS documents_embedding_hnsw_idx
+                    ON documents USING hnsw (embedding vector_cosine_ops)
+                """)
             
-            # Create index for source lookups
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS documents_source_idx 
-                ON documents(source)
-            """)
+                # Create index for source lookups
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS documents_source_idx 
+                    ON documents(source)
+                """)
             
-            # Create GIN index for full-text search
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS documents_content_tsv_idx 
-                ON documents USING gin(content_tsv)
-            """)
+                # Create GIN index for full-text search
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS documents_content_tsv_idx 
+                    ON documents USING gin(content_tsv)
+                """)
             
-            # Create trigger function for auto-updating tsvector
-            await conn.execute("""
-                CREATE OR REPLACE FUNCTION documents_tsvector_trigger() RETURNS trigger AS $$
-                BEGIN
-                    NEW.content_tsv := to_tsvector('english', 
-                        coalesce(NEW.title, '') || ' ' || 
-                        coalesce(NEW.section, '') || ' ' || 
-                        coalesce(NEW.content, '')
-                    );
-                    RETURN NEW;
-                END
-                $$ LANGUAGE plpgsql;
-            """)
+                # Create trigger function for auto-updating tsvector
+                await conn.execute("""
+                    CREATE OR REPLACE FUNCTION documents_tsvector_trigger() RETURNS trigger AS $$
+                    BEGIN
+                        NEW.content_tsv := to_tsvector('english', 
+                            coalesce(NEW.title, '') || ' ' || 
+                            coalesce(NEW.section, '') || ' ' || 
+                            coalesce(NEW.content, '')
+                        );
+                        RETURN NEW;
+                    END
+                    $$ LANGUAGE plpgsql;
+                """)
             
-            # Create trigger to auto-update tsvector on insert/update
-            await conn.execute("""
-                DROP TRIGGER IF EXISTS documents_tsvector_update ON documents;
+                # Create trigger to auto-update tsvector on insert/update
+                await conn.execute("""
+                    DROP TRIGGER IF EXISTS documents_tsvector_update ON documents;
                 
-                CREATE TRIGGER documents_tsvector_update 
-                BEFORE INSERT OR UPDATE ON documents
-                FOR EACH ROW 
-                EXECUTE FUNCTION documents_tsvector_trigger();
-            """)
+                    CREATE TRIGGER documents_tsvector_update 
+                    BEFORE INSERT OR UPDATE ON documents
+                    FOR EACH ROW 
+                    EXECUTE FUNCTION documents_tsvector_trigger();
+                """)
             
-            # Create sessions table for Q&A history
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS qa_sessions (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    question TEXT NOT NULL,
-                    answer TEXT NOT NULL,
-                    sources JSONB DEFAULT '[]',
-                    claims JSONB DEFAULT '[]',
-                    evaluations JSONB DEFAULT '[]',
-                    quality_score FLOAT NOT NULL,
-                    iterations INTEGER NOT NULL,
-                    total_cost FLOAT NOT NULL,
-                    total_duration_ms FLOAT NOT NULL,
-                    trace_id TEXT,
-                    stages JSONB DEFAULT '[]',
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
+                # Create sessions table for Q&A history
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS qa_sessions (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        sources JSONB DEFAULT '[]',
+                        claims JSONB DEFAULT '[]',
+                        evaluations JSONB DEFAULT '[]',
+                        quality_score FLOAT NOT NULL,
+                        total_cost FLOAT NOT NULL,
+                        total_duration_ms FLOAT NOT NULL,
+                        trace_id TEXT,
+                        stages JSONB DEFAULT '[]',
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
             
-            # Create index for recent sessions
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS qa_sessions_created_at_idx 
-                ON qa_sessions(created_at DESC)
-            """)
+                # Migration: drop the legacy iterations column on existing databases.
+                # The refinement loop was removed (single linear pass), so sessions no
+                # longer track an iteration count. IF EXISTS keeps this idempotent and
+                # a no-op on fresh databases.
+                await conn.execute("ALTER TABLE qa_sessions DROP COLUMN IF EXISTS iterations")
+
+                # Create index for recent sessions
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS qa_sessions_created_at_idx
+                    ON qa_sessions(created_at DESC)
+                """)
             
-            # Create index for trace_id lookups
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS qa_sessions_trace_id_idx 
-                ON qa_sessions(trace_id)
-            """)
+                # Create index for trace_id lookups
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS qa_sessions_trace_id_idx 
+                    ON qa_sessions(trace_id)
+                """)
         
         logfire.info("Database initialized successfully")
     
@@ -365,33 +383,40 @@ class VectorStore:
                 
                 doc_scores[doc_id]['bm25_rrf'] = bm25_rrf
             
-            # Combine scores with weights
+            # Combine scores with weights. RRF decides *ordering*; we carry the true
+            # cosine alongside it so the returned similarity_score is interpretable
+            # (0-1) and the relevance gate below operates on real similarity rather
+            # than off-scale RRF values (~0.008).
             ranked_docs = []
             for doc_id, scores in doc_scores.items():
-                # Weighted RRF combination
+                row = scores['row']
                 combined_score = (
                     (1 - bm25_weight) * scores['semantic_rrf'] +
                     bm25_weight * scores['bm25_rrf']
                 )
-                
-                ranked_docs.append((combined_score, scores['row']))
-            
-            # Sort by combined score (descending)
-            ranked_docs.sort(key=lambda x: x[0], reverse=True)
-            
-            # Take top k and convert to Document objects
+                # similarity_score on the row is the cosine from the semantic query
+                # (1 - cosine_distance). BM25-only docs are back-filled with it above;
+                # default to 0.0 only if that back-fill somehow missed.
+                cosine = float(row['similarity_score']) if 'similarity_score' in row.keys() else 0.0
+                ranked_docs.append((combined_score, cosine, row))
+
+            # Relevance gate: keep only docs whose true cosine clears the threshold,
+            # so the result count varies with the question instead of being a fixed
+            # quota. Order survivors by RRF, then cap at k.
+            gated = [t for t in ranked_docs if t[1] >= threshold]
+            gated.sort(key=lambda x: x[0], reverse=True)
+
             documents = []
-            for combined_score, row in ranked_docs[:k]:
+            for combined_score, cosine, row in gated[:k]:
                 # Parse metadata if it's a string
                 metadata = row['metadata']
                 if isinstance(metadata, str):
                     metadata = json.loads(metadata)
-                
-                # Use combined RRF score as similarity_score
+
                 doc = Document(
                     content=row['content'],
                     source=row['source'],
-                    similarity_score=float(combined_score),
+                    similarity_score=cosine,  # interpretable cosine, not RRF
                     metadata={
                         'title': row['title'],
                         'section': row['section'],
@@ -399,13 +424,16 @@ class VectorStore:
                     }
                 )
                 documents.append(doc)
-            
+
             logfire.info(
                 "Hybrid search completed",
+                candidates=len(ranked_docs),
+                passed_threshold=len(gated),
                 final_count=len(documents),
+                threshold=threshold,
                 top_score=documents[0].similarity_score if documents else 0.0
             )
-            
+
             return documents
     
     async def get_document_count(self) -> int:
@@ -452,7 +480,6 @@ class VectorStore:
         claims: list,
         evaluations: list,
         quality_score: float,
-        iterations: int,
         total_cost: float,
         total_duration_ms: float,
         trace_id: Optional[str] = None,
@@ -471,13 +498,13 @@ class VectorStore:
         
         async with self.pool.acquire() as conn:
             result = await conn.fetchrow("""
-                INSERT INTO qa_sessions 
-                (question, answer, sources, claims, evaluations, quality_score, 
-                 iterations, total_cost, total_duration_ms, trace_id, stages)
-                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10, $11::jsonb)
+                INSERT INTO qa_sessions
+                (question, answer, sources, claims, evaluations, quality_score,
+                 total_cost, total_duration_ms, trace_id, stages)
+                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10::jsonb)
                 RETURNING id
             """, question, answer, sources_json, claims_json, evaluations_json,
-                quality_score, iterations, total_cost, total_duration_ms, trace_id, stages_json)
+                quality_score, total_cost, total_duration_ms, trace_id, stages_json)
             
             session_id = str(result['id'])
             logfire.info(f"Saved Q&A session: {session_id}", trace_id=trace_id)
@@ -493,7 +520,7 @@ class VectorStore:
             rows = await conn.fetch("""
                 SELECT 
                     id, question, answer, sources, claims, evaluations,
-                    quality_score, iterations, total_cost, total_duration_ms,
+                    quality_score, total_cost, total_duration_ms,
                     created_at, trace_id, stages
                 FROM qa_sessions
                 ORDER BY created_at DESC
@@ -528,7 +555,7 @@ class VectorStore:
             row = await conn.fetchrow("""
                 SELECT 
                     id, question, answer, sources, claims, evaluations,
-                    quality_score, iterations, total_cost, total_duration_ms,
+                    quality_score, total_cost, total_duration_ms,
                     created_at, trace_id, stages
                 FROM qa_sessions
                 WHERE id = $1
