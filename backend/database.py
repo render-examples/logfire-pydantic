@@ -168,14 +168,29 @@ class VectorStore:
                     ON qa_sessions(trace_id)
                 """)
 
-                # Live per-stage progress for in-flight pipeline runs. The Workflows
-                # service writes here as it advances through stages; the gateway reads
-                # it while polling so the UI can show real stage-by-stage feedback.
+                # Live per-stage progress for in-flight pipeline runs. The pipeline
+                # writes here as it advances through stages; the gateway reads it
+                # while polling so the UI can show real stage-by-stage feedback.
                 # One short-lived row per run, keyed by an opaque progress token.
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS pipeline_progress (
                         token TEXT PRIMARY KEY,
                         updates JSONB NOT NULL DEFAULT '[]',
+                        updated_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+
+                # Terminal status + result for an in-process pipeline run. POST /ask
+                # launches the pipeline as a background task and inserts a 'running'
+                # row here; the task flips it to 'done' (with the result) or 'failed'
+                # (with the error). GET /ask/{run_id} reads this — there is no longer
+                # a Workflows run to poll. One short-lived row per run, swept after a day.
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS pipeline_runs (
+                        run_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        result JSONB,
+                        error TEXT,
                         updated_at TIMESTAMP DEFAULT NOW()
                     )
                 """)
@@ -594,6 +609,54 @@ class VectorStore:
             return []
         updates = row["updates"]
         return json.loads(updates) if isinstance(updates, str) else updates
+
+    async def set_run_status(
+        self,
+        run_id: str,
+        status: str,
+        result: Optional[dict] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Upsert the terminal status of an in-process pipeline run.
+
+        POST /ask inserts a ``running`` row, then the background task flips it to
+        ``done`` (with ``result``) or ``failed`` (with ``error``). Stale rows from
+        earlier runs are swept opportunistically so the table stays small.
+        """
+        if not self.pool:
+            return
+
+        result_json = json.dumps(result) if result is not None else None
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO pipeline_runs (run_id, status, result, error, updated_at)
+                VALUES ($1, $2, $3::jsonb, $4, NOW())
+                ON CONFLICT (run_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    result = EXCLUDED.result,
+                    error = EXCLUDED.error,
+                    updated_at = NOW()
+            """, run_id, status, result_json, error)
+            await conn.execute(
+                "DELETE FROM pipeline_runs WHERE updated_at < NOW() - INTERVAL '1 day'"
+            )
+
+    async def get_run_status(self, run_id: str) -> Optional[dict]:
+        """Return ``{status, result, error}`` for a run, or None if unknown."""
+        if not self.pool:
+            return None
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status, result, error FROM pipeline_runs WHERE run_id = $1",
+                run_id,
+            )
+        if not row:
+            return None
+        result = row["result"]
+        if isinstance(result, str):
+            result = json.loads(result)
+        return {"status": row["status"], "result": result, "error": row["error"]}
 
     async def get_recent_sessions(self, client_id: str, limit: int = 20) -> list[dict]:
         """Get recent Q&A sessions for a given browser client.
