@@ -8,6 +8,8 @@
 
 Intelligent question-answering system that demonstrates real-world AI observability patterns. This example project shows how to build, instrument, and monitor a multi-stage LLM pipeline with full cost tracking, quality evaluation, and performance monitoring.
 
+https://github.com/user-attachments/assets/77dd86d1-8d79-48dc-8741-6049e7fad524
+
 ## Table of Contents
 
 - [What This App Does](#what-this-app-does)
